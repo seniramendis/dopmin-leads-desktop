@@ -4,6 +4,7 @@ directories:
   buildResources: build
 win:
   icon: build/icon.ico
+  executableName: dopmin-leads-desktop
 files:
   - '!**/.vscode/*'
   - '!src/*'
@@ -13,8 +14,6 @@ files:
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
 asarUnpack:
   - resources/**
-win:
-  executableName: dopmin-leads-desktop
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}

@@ -1,8 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-// We expose the custom scraping command to the Svelte frontend
 const api = {
-  scrapeLeads: (searchQuery) => ipcRenderer.invoke('start-scraping', searchQuery)
+  startScraping: (searchData) => ipcRenderer.invoke('start-scraping', searchData),
+  scrapeLeads: (searchQuery) =>
+    ipcRenderer.invoke('start-scraping', { query: searchQuery, maxResults: 20 }),
+  getApiKey: () => ipcRenderer.invoke('get-api-key'),
+  setApiKey: (key) => ipcRenderer.invoke('set-api-key', key)
 }
 
 if (process.contextIsolated) {

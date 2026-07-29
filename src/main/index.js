@@ -1,13 +1,24 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import Store from 'electron-store'
+import { scrapeLeads } from './scraper'
+// Some bundlers / runtime environments expose the default export under
+// the `.default` property when mixing ESM and CommonJS. Use the
+// actual constructor if present, otherwise fall back to the import value.
+const StoreClass = Store && Store.default ? Store.default : Store
 import icon from '../../resources/icon.png?asset'
 
+// --- Feature 1: API Key Management ---
+// encryptionKey obfuscates the value at rest so it isn't plaintext JSON on disk.
+const store = new StoreClass({
+  encryptionKey: 'dopmin-scraper-local-key'
+})
+
 function createWindow() {
-  // Create the main dashboard window.
   const mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 700,
+    width: 1200,
+    height: 800,
     show: false,
     autoHideMenuBar: true,
     icon,
@@ -33,60 +44,39 @@ function createWindow() {
   }
 }
 
+function registerIpcHandlers() {
+  ipcMain.handle('get-api-key', () => store.get('apiKey', ''))
+
+  ipcMain.handle('set-api-key', (_event, key) => {
+    store.set('apiKey', key)
+    return true
+  })
+
+  ipcMain.handle('start-scraping', async (_event, searchData = {}) => {
+    const query = typeof searchData === 'string' ? searchData : searchData.query || ''
+    const maxResults = typeof searchData === 'string' ? 20 : searchData.maxResults ?? 20
+
+    if (!query.trim()) {
+      return { success: false, error: 'Please enter a search query.' }
+    }
+
+    const apiKey = store.get('apiKey', '')
+    if (!apiKey) {
+      console.warn('No API key configured yet — set one in Settings.')
+    }
+
+    return scrapeLeads(query, Number(maxResults))
+  })
+}
+
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.electron.app')
 
-  // Listen for window shortcut events
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // --- THE GOOGLE MAPS SCRAPER LOGIC ---
-  ipcMain.handle('start-scraping', async (event, searchQuery) => {
-    console.log(`Starting scrape for: ${searchQuery}`)
-
-    // 1. Open a hidden background window
-    const scrapeWindow = new BrowserWindow({
-      show: false,
-      webPreferences: { nodeIntegration: false, contextIsolation: true }
-    })
-
-    // 2. Format the URL and load Google Maps
-    const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`
-    await scrapeWindow.loadURL(searchUrl)
-
-    // 3. Inject JavaScript into the hidden window to extract the data
-    const extractedLeads = await scrapeWindow.webContents.executeJavaScript(`
-      new Promise((resolve) => {
-        // Wait 5 seconds for Google to load the map pins
-        setTimeout(() => {
-          const cards = Array.from(document.querySelectorAll('a.hfpxzc')); 
-          
-          const data = cards.map(card => {
-              const name = card.getAttribute('aria-label') || 'Unknown';
-              const rawDetails = card.parentElement ? card.parentElement.innerText : ''; 
-              
-              // Check if a "Website" button exists in the text
-              const hasWebsite = rawDetails.includes('Website');
-              
-              // Extract the star rating using Regex
-              const ratingMatch = rawDetails.match(/([1-5]\\\\.[0-9])/);
-              const rating = ratingMatch ? parseFloat(ratingMatch[1]) : 0;
-              
-              return { name, rawDetails, hasWebsite, rating };
-          });
-          resolve(data);
-        }, 5000); 
-      });
-    `)
-
-    // Clean up memory
-    scrapeWindow.destroy()
-
-    // Send data back to Svelte
-    return extractedLeads
-  })
-
+  registerIpcHandlers()
   createWindow()
 
   app.on('activate', function () {
