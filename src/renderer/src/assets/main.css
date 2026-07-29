@@ -12,13 +12,7 @@ code {
   background-color: var(--surface-soft);
   border: 1px solid var(--border);
   font-family:
-    ui-monospace,
-    SFMono-Regular,
-    'SF Mono',
-    Menlo,
-    Consolas,
-    'Liberation Mono',
-    monospace;
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   font-size: 85%;
 }
 

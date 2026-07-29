@@ -1,19 +1,9 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import Store from 'electron-store'
-import { scrapeLeads } from './scraper'
-// Some bundlers / runtime environments expose the default export under
-// the `.default` property when mixing ESM and CommonJS. Use the
-// actual constructor if present, otherwise fall back to the import value.
-const StoreClass = Store && Store.default ? Store.default : Store
 import icon from '../../resources/icon.png?asset'
-
-// --- Feature 1: API Key Management ---
-// encryptionKey obfuscates the value at rest so it isn't plaintext JSON on disk.
-const store = new StoreClass({
-  encryptionKey: 'dopmin-scraper-local-key'
-})
+import { scrapeLeads } from './scraper'
+import { getApiKey, setApiKey } from './secureStore'
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -45,10 +35,10 @@ function createWindow() {
 }
 
 function registerIpcHandlers() {
-  ipcMain.handle('get-api-key', () => store.get('apiKey', ''))
+  ipcMain.handle('get-api-key', () => getApiKey())
 
   ipcMain.handle('set-api-key', (_event, key) => {
-    store.set('apiKey', key)
+    setApiKey(key)
     return true
   })
 
@@ -61,8 +51,7 @@ function registerIpcHandlers() {
       return { success: false, error: 'Please enter a search query.' }
     }
 
-    const apiKey = store.get('apiKey', '')
-    if (!apiKey) {
+    if (!getApiKey()) {
       console.warn('No API key configured yet — set one in Settings.')
     }
 
@@ -79,7 +68,7 @@ function registerIpcHandlers() {
       }
     }
 
-    return scrapeLeads(query, Number(maxResults), onProgress)
+    return scrapeLeads(query, maxResults, onProgress)
   })
 }
 

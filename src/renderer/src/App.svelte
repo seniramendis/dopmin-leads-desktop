@@ -1,5 +1,15 @@
 <script>
   import { onDestroy } from 'svelte'
+  import SplashScreen from './components/SplashScreen.svelte'
+  import AppHeader from './components/AppHeader.svelte'
+  import SearchPanel from './components/SearchPanel.svelte'
+  import ProgressBanner from './components/ProgressBanner.svelte'
+  import Banner from './components/Banner.svelte'
+  import StatsOverview from './components/StatsOverview.svelte'
+  import LeadsPanel from './components/LeadsPanel.svelte'
+  import ResultsTable from './components/ResultsTable.svelte'
+
+  let showSplash = true
 
   let query = 'hardware stores in Mount Lavinia'
   let desiredCount = 30
@@ -13,7 +23,6 @@
   let hasSearched = false
   let wasExpanded = false
   let queriesUsed = []
-  let onlyNoWebsite = true
 
   // Live progress while a search is in flight.
   let progressPhase = '' // '' | 'searching' | 'discovering' | 'extracting' | 'done'
@@ -28,8 +37,6 @@
     .filter((l) => l.isReputationRisk)
     .sort((a, b) => (a.rating ?? 5) - (b.rating ?? 5))
   $: noWebsiteCount = leads.filter((l) => !l.hasWebsite).length
-  $: visibleLeads = onlyNoWebsite ? leads.filter((l) => !l.hasWebsite) : leads
-  $: extractPercent = extractTotal > 0 ? Math.round((extractDone / extractTotal) * 100) : 0
 
   function resetProgress() {
     progressPhase = ''
@@ -91,330 +98,71 @@
   onDestroy(() => {
     unsubscribeProgress?.()
   })
-
-  function copyToClipboard(text) {
-    navigator.clipboard?.writeText(text)
-  }
-
-  function copyLead(lead) {
-    copyToClipboard(`${lead.name} | ${lead.phone} | ${lead.rating ?? 'N/A'}★ (${lead.reviewCount})`)
-  }
-
-  function exportToCSV() {
-    if (!visibleLeads.length) return
-
-    const header = [
-      'Business Name',
-      'Phone Number',
-      'Category',
-      'Address',
-      'Rating',
-      'Reviews',
-      'Website Status',
-      'Website',
-      'Reputation',
-      'Maps URL'
-    ]
-    const rows = [
-      header.join(','),
-      ...visibleLeads.map((lead) =>
-        [
-          `"${lead.name}"`,
-          `"${lead.phone}"`,
-          `"${lead.category || ''}"`,
-          `"${lead.address || ''}"`,
-          lead.rating ?? '',
-          lead.reviewCount ?? 0,
-          `"${lead.status}"`,
-          `"${lead.website || ''}"`,
-          `"${lead.reputation}"`,
-          `"${lead.mapsUrl || ''}"`
-        ].join(',')
-      )
-    ]
-
-    const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `dopmin-leads-${Date.now()}.csv`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
-  }
-
-  function stars(rating) {
-    if (rating === null || rating === undefined) return '—'
-    const full = Math.round(rating)
-    return '★'.repeat(full) + '☆'.repeat(5 - full)
-  }
 </script>
 
 <main class="app">
-  <header class="topbar">
-    <div class="brand">
-      <div class="brand-mark">D</div>
-      <div>
-        <div class="brand-name">Dopmin Web Scraper</div>
-        <div class="brand-sub">Local lead extraction, without the noise</div>
-      </div>
-    </div>
-    <div class="topbar-right">
-      <span class="workspace-pill">Workspace: Alpha</span>
-    </div>
-  </header>
+  {#if showSplash}
+    <SplashScreen on:done={() => (showSplash = false)} />
+  {/if}
 
-  <section class="hero">
-    <h1>Extraction Engine</h1>
-    <p class="hero-sub">
-      Deploy deep-search scraping across Google Maps to harvest high-intent business leads —
-      deduplicated, and sorted by review sentiment.
-    </p>
+  <AppHeader />
 
-    <div class="search-card">
-      <div class="search-row">
-        <div class="field grow">
-          <label for="query-input">Search query</label>
-          <input
-            id="query-input"
-            bind:value={query}
-            placeholder="e.g., Electricians in Kandy, Sri Lanka"
-            disabled={isScraping}
-            on:keydown={(event) => event.key === 'Enter' && handleSearch()}
-          />
-        </div>
-        <div class="field count-field">
-          <label for="count-input">Max results</label>
-          <input
-            id="count-input"
-            type="number"
-            min="1"
-            max="500"
-            bind:value={desiredCount}
-            disabled={isScraping}
-          />
-        </div>
-        <button class="primary-btn" on:click={handleSearch} disabled={isScraping}>
-          {isScraping ? 'Scraping…' : 'Launch Extraction'}
-        </button>
-      </div>
-      <p class="search-hint">
-        We'll try to find exactly {Math.max(
-          1,
-          Math.min(500, Math.floor(Number(desiredCount)) || 30)
-        )}
-        unique businesses. If fewer genuinely exist for this search, we'll show everything we found instead
-        of padding the list. Just a city or town name (no business type) also works — we'll automatically
-        search it across common local business categories for you.
-      </p>
-    </div>
-  </section>
+  <SearchPanel bind:query bind:desiredCount {isScraping} onSearch={handleSearch} />
 
   {#if errorMessage}
-    <div class="error-banner">{errorMessage}</div>
+    <Banner variant="error">{errorMessage}</Banner>
   {/if}
 
   {#if isScraping}
-    <div class="status-banner progress-banner">
-      {#if progressPhase === 'searching' || !progressPhase}
-        <span>{progressMessage || 'Opening Google Maps…'}</span>
-      {:else if progressPhase === 'discovering'}
-        <span
-          >Indexing businesses in the area… found {discoveredCount} so far (target {desiredCount})</span
-        >
-      {:else if progressPhase === 'extracting'}
-        <span
-          >Reading business details — phone numbers, websites, addresses… {extractDone} / {extractTotal}</span
-        >
-        <div class="progress-track">
-          <div class="progress-fill" style="width: {extractPercent}%"></div>
-        </div>
-      {:else}
-        <span>Finishing up…</span>
-      {/if}
-    </div>
+    <ProgressBanner
+      {progressPhase}
+      {progressMessage}
+      {discoveredCount}
+      {desiredCount}
+      {extractDone}
+      {extractTotal}
+    />
   {/if}
 
   {#if hasSearched && !isScraping && wasExpanded && leads.length > 0}
-    <div class="status-banner">
+    <Banner variant="info">
       "{query}" looked like just a place name, so we broadened it across {queriesUsed.length}
-      business categories ({queriesUsed.length ? queriesUsed[0] : ''}, …) to find real listings there.
-    </div>
+      business categories ({queriesUsed.length ? queriesUsed[0] : ''}, …) to find real listings
+      there.
+    </Banner>
   {/if}
 
   {#if hasSearched && !isScraping && leads.length > 0}
-    <section class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">Unique Leads Found</div>
-        <div class="stat-value">{totalFound}</div>
-        <div class="stat-note">
-          {#if truncated}
-            requested {requested}, more available
-          {:else}
-            of {requested} requested
-          {/if}
-        </div>
-      </div>
-      <div class="stat-card accent-green">
-        <div class="stat-label">Hot Leads</div>
-        <div class="stat-value">{hotLeads.length}</div>
-        <div class="stat-note">No website + good reviews</div>
-      </div>
-      <div class="stat-card accent-red">
-        <div class="stat-label">Reputation Targets</div>
-        <div class="stat-value">{riskLeads.length}</div>
-        <div class="stat-note">No website + poor reviews</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">No Website</div>
-        <div class="stat-value">{noWebsiteCount}</div>
-        <div class="stat-note">out of {leads.length} shown</div>
-      </div>
-    </section>
+    <StatsOverview
+      {totalFound}
+      {requested}
+      {truncated}
+      hotLeadsCount={hotLeads.length}
+      riskLeadsCount={riskLeads.length}
+      {noWebsiteCount}
+      totalShown={leads.length}
+    />
 
     <section class="split-grid">
-      <div class="panel panel-green">
-        <div class="panel-header">
-          <h2>High-Value Leads</h2>
-          <span class="panel-tag">good reviews</span>
-        </div>
-        {#if hotLeads.length === 0}
-          <p class="empty-note">No no-website leads with strong ratings in this batch.</p>
-        {:else}
-          <table>
-            <thead>
-              <tr>
-                <th>Business</th>
-                <th>Rating</th>
-                <th>Reviews</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each hotLeads.slice(0, 8) as lead (lead.id)}
-                <tr>
-                  <td>{lead.name}</td>
-                  <td class="stars-cell">{stars(lead.rating)}</td>
-                  <td>{lead.reviewCount}</td>
-                  <td>
-                    <button class="icon-btn" on:click={() => copyLead(lead)} title="Copy details"
-                      >⧉</button
-                    >
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-      </div>
-
-      <div class="panel panel-red">
-        <div class="panel-header">
-          <h2>Reputation Rescue</h2>
-          <span class="panel-tag">bad reviews</span>
-        </div>
-        {#if riskLeads.length === 0}
-          <p class="empty-note">No no-website leads with weak ratings in this batch.</p>
-        {:else}
-          <table>
-            <thead>
-              <tr>
-                <th>Business</th>
-                <th>Rating</th>
-                <th>Reviews</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each riskLeads.slice(0, 8) as lead (lead.id)}
-                <tr>
-                  <td>{lead.name}</td>
-                  <td class="stars-cell risk">{stars(lead.rating)}</td>
-                  <td>{lead.reviewCount}</td>
-                  <td>
-                    <button class="icon-btn" on:click={() => copyLead(lead)} title="Copy details"
-                      >⧉</button
-                    >
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-      </div>
+      <LeadsPanel
+        title="High-Value Leads"
+        tag="good reviews"
+        variant="green"
+        leads={hotLeads}
+        emptyMessage="No no-website leads with strong ratings in this batch."
+      />
+      <LeadsPanel
+        title="Reputation Rescue"
+        tag="bad reviews"
+        variant="red"
+        leads={riskLeads}
+        emptyMessage="No no-website leads with weak ratings in this batch."
+      />
     </section>
 
-    <section class="results-card">
-      <div class="results-header">
-        <h2>All results ({visibleLeads.length})</h2>
-        <div class="results-actions">
-          <label class="filter-toggle">
-            <input type="checkbox" bind:checked={onlyNoWebsite} />
-            Only businesses without a website
-          </label>
-          <button class="export-btn" on:click={exportToCSV}>Export CSV</button>
-        </div>
-      </div>
-
-      <table class="full-table">
-        <thead>
-          <tr>
-            <th>Business Name</th>
-            <th>Category</th>
-            <th>Phone Number</th>
-            <th>Address</th>
-            <th>Rating</th>
-            <th>Reviews</th>
-            <th>Website</th>
-            <th>Reputation</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each visibleLeads as lead (lead.id)}
-            <tr>
-              <td>
-                <a class="lead-link" href={lead.mapsUrl} target="_blank" rel="noreferrer"
-                  >{lead.name}</a
-                >
-              </td>
-              <td class="muted-cell">{lead.category || '—'}</td>
-              <td>{lead.phone}</td>
-              <td class="muted-cell address-cell">{lead.address || '—'}</td>
-              <td class="stars-cell" class:risk={lead.isReputationRisk}>{stars(lead.rating)}</td>
-              <td>{lead.reviewCount}</td>
-              <td>
-                {#if lead.hasWebsite}
-                  <a class="website-link" href={lead.website} target="_blank" rel="noreferrer"
-                    >Visit site</a
-                  >
-                {:else}
-                  <span class="badge badge-warn">No Website Found</span>
-                {/if}
-              </td>
-              <td>
-                <span class="rep-pill rep-{lead.reputation}">{lead.reputation}</span>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-      {#if visibleLeads.length === 0}
-        <p class="empty-note">
-          No businesses without a website in this batch. Uncheck the filter above to see all
-          {leads.length} results.
-        </p>
-      {/if}
-      {#if failedCount > 0}
-        <p class="failed-note">
-          {failedCount}
-          {failedCount === 1 ? 'listing' : 'listings'} couldn't be read (Google blocked or timed out)
-          and {failedCount === 1 ? 'was' : 'were'} skipped.
-        </p>
-      {/if}
-    </section>
+    <ResultsTable {leads} {failedCount} />
   {:else if hasSearched && !isScraping && leads.length === 0 && !errorMessage}
-    <div class="status-banner">No results found for this search. Try broadening your query.</div>
+    <Banner variant="info">No results found for this search. Try broadening your query.</Banner>
   {/if}
 </main>
 
@@ -445,458 +193,13 @@
     gap: 22px;
   }
 
-  .topbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding-bottom: 8px;
-  }
-
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .brand-mark {
-    width: 40px;
-    height: 40px;
-    border-radius: 12px;
-    background: linear-gradient(135deg, #3b82f6, #6366f1);
-    color: #fff;
-    font-weight: 800;
-    font-size: 1.1rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .brand-name {
-    font-weight: 800;
-    font-size: 1.15rem;
-    color: #0f172a;
-  }
-
-  .brand-sub {
-    font-size: 0.8rem;
-    color: #64748b;
-  }
-
-  .workspace-pill {
-    background: #eef2ff;
-    color: #4338ca;
-    border: 1px solid #e0e7ff;
-    padding: 6px 12px;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-  }
-
-  .hero {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 20px;
-    padding: 28px;
-  }
-
-  .hero h1 {
-    margin: 0 0 6px;
-    font-size: 1.9rem;
-    letter-spacing: -0.01em;
-  }
-
-  .hero-sub {
-    margin: 0 0 20px;
-    color: #64748b;
-    max-width: 640px;
-  }
-
-  .search-card {
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 16px;
-    padding: 18px;
-  }
-
-  .search-row {
-    display: flex;
-    gap: 12px;
-    align-items: flex-end;
-    flex-wrap: wrap;
-  }
-
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .field.grow {
-    flex: 1;
-    min-width: 240px;
-  }
-
-  .count-field {
-    width: 130px;
-  }
-
-  label {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: #475569;
-  }
-
-  input {
-    padding: 12px 14px;
-    border: 1px solid #cbd5e1;
-    border-radius: 10px;
-    background: #ffffff;
-    color: #0f172a;
-    font-size: 0.95rem;
-  }
-
-  input:focus {
-    outline: none;
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
-  }
-
-  .search-hint {
-    margin: 10px 2px 0;
-    font-size: 0.78rem;
-    color: #94a3b8;
-  }
-
-  .primary-btn {
-    border: none;
-    border-radius: 10px;
-    padding: 12px 20px;
-    background: linear-gradient(135deg, #3b82f6, #6366f1);
-    color: #fff;
-    font-weight: 700;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .primary-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .error-banner {
-    padding: 12px 16px;
-    border-radius: 10px;
-    background: #fef2f2;
-    color: #b91c1c;
-    border: 1px solid #fecaca;
-  }
-
-  .status-banner {
-    padding: 12px 16px;
-    border-radius: 10px;
-    background: #eff6ff;
-    color: #1d4ed8;
-    border: 1px solid #bfdbfe;
-  }
-
-  .progress-banner {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .progress-track {
-    width: 100%;
-    height: 8px;
-    border-radius: 999px;
-    background: #dbeafe;
-    overflow: hidden;
-  }
-
-  .progress-fill {
-    height: 100%;
-    background: linear-gradient(135deg, #3b82f6, #6366f1);
-    border-radius: 999px;
-    transition: width 0.3s ease;
-  }
-
-  .lead-link {
-    color: #0f172a;
-    text-decoration: none;
-    font-weight: 600;
-  }
-
-  .lead-link:hover {
-    color: #3b82f6;
-    text-decoration: underline;
-  }
-
-  .website-link {
-    color: #0f766e;
-    font-weight: 600;
-    text-decoration: none;
-    font-size: 0.85rem;
-  }
-
-  .website-link:hover {
-    text-decoration: underline;
-  }
-
-  .muted-cell {
-    color: #64748b;
-  }
-
-  .address-cell {
-    max-width: 220px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .failed-note {
-    margin: 10px 2px 0;
-    font-size: 0.8rem;
-    color: #94a3b8;
-  }
-
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 14px;
-  }
-
-  .stat-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 16px;
-    padding: 16px 18px;
-  }
-
-  .stat-card.accent-green {
-    border-color: #bbf7d0;
-    background: #f0fdf4;
-  }
-
-  .stat-card.accent-red {
-    border-color: #fecaca;
-    background: #fef2f2;
-  }
-
-  .stat-label {
-    font-size: 0.76rem;
-    font-weight: 600;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .stat-value {
-    font-size: 1.7rem;
-    font-weight: 800;
-    margin-top: 4px;
-    color: #0f172a;
-  }
-
-  .stat-note {
-    font-size: 0.78rem;
-    color: #94a3b8;
-    margin-top: 2px;
-  }
-
   .split-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
   }
 
-  .panel {
-    background: #ffffff;
-    border-radius: 16px;
-    padding: 18px;
-    border: 1px solid #e2e8f0;
-    border-top: 3px solid #cbd5e1;
-  }
-
-  .panel-green {
-    border-top-color: #22c55e;
-  }
-
-  .panel-red {
-    border-top-color: #ef4444;
-  }
-
-  .panel-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 12px;
-  }
-
-  .panel-header h2 {
-    margin: 0;
-    font-size: 1.05rem;
-  }
-
-  .panel-tag {
-    font-size: 0.72rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: #64748b;
-    background: #f1f5f9;
-    padding: 3px 8px;
-    border-radius: 999px;
-  }
-
-  .empty-note {
-    color: #94a3b8;
-    font-size: 0.85rem;
-    margin: 8px 0 4px;
-  }
-
-  .results-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 16px;
-    padding: 20px;
-  }
-
-  .results-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 12px;
-  }
-
-  .results-header h2 {
-    margin: 0;
-    font-size: 1.1rem;
-  }
-
-  .results-actions {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-  }
-
-  .filter-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.82rem;
-    font-weight: 600;
-    color: #475569;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .filter-toggle input {
-    padding: 0;
-    accent-color: #0f766e;
-    cursor: pointer;
-  }
-
-  .export-btn {
-    border: none;
-    border-radius: 10px;
-    padding: 10px 16px;
-    background: #0f766e;
-    color: #fff;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-
-  th,
-  td {
-    padding: 10px 8px;
-    text-align: left;
-    border-bottom: 1px solid #eef2f6;
-    font-size: 0.88rem;
-  }
-
-  th {
-    color: #94a3b8;
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
-
-  .stars-cell {
-    color: #16a34a;
-    letter-spacing: 1px;
-  }
-
-  .stars-cell.risk {
-    color: #dc2626;
-  }
-
-  .icon-btn {
-    border: 1px solid #e2e8f0;
-    background: #f8fafc;
-    border-radius: 8px;
-    padding: 4px 8px;
-    cursor: pointer;
-    color: #475569;
-  }
-
-  .badge {
-    display: inline-block;
-    padding: 4px 8px;
-    border-radius: 999px;
-    background: #f1f5f9;
-    color: #475569;
-    font-size: 0.78rem;
-  }
-
-  .badge-warn {
-    background: #fff7ed;
-    color: #c2410c;
-  }
-
-  .rep-pill {
-    display: inline-block;
-    padding: 3px 9px;
-    border-radius: 999px;
-    font-size: 0.74rem;
-    font-weight: 700;
-    text-transform: capitalize;
-  }
-
-  .rep-excellent {
-    background: #dcfce7;
-    color: #15803d;
-  }
-
-  .rep-good {
-    background: #ecfccb;
-    color: #4d7c0f;
-  }
-
-  .rep-average {
-    background: #fef9c3;
-    color: #a16207;
-  }
-
-  .rep-poor {
-    background: #fee2e2;
-    color: #b91c1c;
-  }
-
-  .rep-unrated {
-    background: #f1f5f9;
-    color: #64748b;
-  }
-
   @media (max-width: 820px) {
-    .stats-grid {
-      grid-template-columns: repeat(2, 1fr);
-    }
     .split-grid {
       grid-template-columns: 1fr;
     }

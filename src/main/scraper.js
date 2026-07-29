@@ -13,90 +13,24 @@
 //   which is what makes phone numbers and website presence trustworthy —
 //   the old implementation guessed both from truncated card text and missed
 //   a large fraction of businesses that had them.
+//
+// A bare place name (no business type) is fanned out into several category
+// queries by queryExpansion.js before phase 1 runs, so "Mount Lavinia"
+// finds real businesses instead of a near-empty result.
 import { chromium } from 'playwright'
+import {
+  REPUTATION_THRESHOLDS,
+  DETAIL_CONCURRENCY,
+  MAX_DETAIL_RETRIES,
+  NAV_TIMEOUT_MS
+} from './constants'
+import { expandQuery } from './queryExpansion'
 
-// Rating thresholds used to classify a lead's reputation from its Google
-// Maps star rating. This is what powers the "good reviews vs bad reviews"
-// split shown in the UI (High-Value Leads vs Reputation Rescue).
-const REPUTATION_THRESHOLDS = {
-  excellent: 4.5, // 4.5★ and up
-  good: 4.0, // 4.0★ – 4.49★
-  average: 3.0 // 3.0★ – 3.99★  (below this = "poor")
-}
-
-// How many place detail pages we read at once. Higher = faster, but more
-// likely to trip Google's rate limiting on very large runs. 6 is a good
-// balance for a single headless browser instance.
-const DETAIL_CONCURRENCY = 6
-
-// Retries per listing if a detail page fails to load or times out.
-const MAX_DETAIL_RETRIES = 2
-
-const NAV_TIMEOUT_MS = 30000
-
-// Words that signal the user already told us what KIND of business they
-// want (e.g. "restaurants in Kandy", "hardware stores near Galle"). If a
-// query contains none of these, it's almost certainly just a place name
-// ("Mount Lavinia", "Kalutara town") — and Google Maps returns weak/empty
-// results for a bare place with no category, so we expand it ourselves.
-const BUSINESS_TYPE_HINTS = [
-  'store', 'stores', 'shop', 'shops', 'restaurant', 'restaurants', 'hotel',
-  'hotels', 'salon', 'salons', 'spa', 'garage', 'mechanic', 'clinic',
-  'clinics', 'hospital', 'pharmacy', 'pharmacies', 'bakery', 'bakeries',
-  'gym', 'gyms', 'dealer', 'dealers', 'agency', 'agencies', 'firm', 'firms',
-  'service', 'services', 'repair', 'market', 'supermarket', 'supermarkets',
-  'cafe', 'cafes', 'bar', 'bars', 'school', 'schools', 'boutique',
-  'workshop', 'electrician', 'electricians', 'plumber', 'plumbers',
-  'lawyer', 'lawyers', 'accountant', 'accountants', 'contractor',
-  'contractors', 'furniture', 'electronics', 'grocery', 'groceries',
-  'bank', 'banks', 'jewel', 'jeweller', 'jewelers', 'tailor', 'tailors',
-  'printer', 'printers', 'photographer', 'photographers', 'apartments',
-  'real estate', 'realtor', 'realtors', 'clothing', 'wear', 'mobile',
-  'phone', 'computer', 'computers', 'hardware', 'construction'
-]
-
-// Default set of categories we fan a bare place name out into. Kept broad
-// and locally-relevant (Sri Lankan small-business landscape) rather than
-// exhaustive, since the loop below stops as soon as enough leads are found
-// — later categories only run if earlier ones didn't fill the quota.
-const DEFAULT_CATEGORY_EXPANSION = [
-  'restaurants',
-  'hotels',
-  'shops',
-  'supermarkets',
-  'pharmacies',
-  'hardware stores',
-  'salons',
-  'auto repair shops',
-  'electronics stores',
-  'clothing stores',
-  'bakeries',
-  'clinics',
-  'gyms',
-  'furniture stores',
-  'law firms',
-  'real estate agents',
-  'construction companies',
-  'schools',
-  'grocery stores',
-  'mobile phone shops'
-]
-
-function looksLikeBarePlaceName(query) {
-  const q = query.toLowerCase()
-  return !BUSINESS_TYPE_HINTS.some((hint) => q.includes(hint))
-}
-
-/** Turns a single user query into a list of queries to actually run against
- * Google Maps. If the user already specified a business type, we run
- * exactly that one query unchanged. If it looks like a bare city/town name,
- * we fan it out into "<category> in <place>" for a broad set of common
- * local business categories, so a search like "Mount Lavinia" alone still
- * turns up real businesses instead of a near-empty result. */
-function expandQuery(query) {
-  const trimmed = query.trim()
-  if (!looksLikeBarePlaceName(trimmed)) return [trimmed]
-  return DEFAULT_CATEGORY_EXPANSION.map((category) => `${category} in ${trimmed}`)
+class RateLimitedError extends Error {
+  constructor() {
+    super('Google temporarily rate-limited this search. Wait a bit and try again.')
+    this.name = 'RateLimitedError'
+  }
 }
 
 function classifyReputation(rating) {
@@ -375,11 +309,95 @@ async function runDetailPool(context, listings, concurrency, onProgress) {
   return results
 }
 
+/**
+ * Runs the discovery phase across every sub-query, deduping listings by
+ * href as it goes, and stops as soon as `desired` unique listings are
+ * found (or every sub-query has been tried).
+ */
+async function discoverListings(context, subQueries, desired, onProgress) {
+  const listings = []
+  const seenHrefs = new Set()
+  const isExpanded = subQueries.length > 1
+
+  for (let i = 0; i < subQueries.length && listings.length < desired; i += 1) {
+    const subQuery = subQueries[i]
+    const listPage = await context.newPage()
+    const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(subQuery)}?hl=en`
+
+    onProgress?.({
+      phase: 'searching',
+      message: isExpanded
+        ? `Broadening the search — trying "${subQuery}" (${i + 1}/${subQueries.length})…`
+        : `Opening Google Maps for "${subQuery}"…`
+    })
+
+    try {
+      await listPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+
+      if (await isBlockedPage(listPage)) {
+        await listPage.close()
+        // If we already have some results from earlier sub-queries, keep
+        // them rather than failing the whole search over one rate limit.
+        if (listings.length > 0) break
+        throw new RateLimitedError()
+      }
+
+      await dismissConsentIfPresent(listPage)
+      await listPage.waitForTimeout(2500)
+
+      const remaining = desired - listings.length
+      const found = await collectListingUrls(listPage, remaining, onProgress)
+      for (const item of found) {
+        if (seenHrefs.has(item.href)) continue
+        seenHrefs.add(item.href)
+        listings.push(item)
+        if (listings.length >= desired) break
+      }
+    } catch (error) {
+      if (error instanceof RateLimitedError) throw error
+      // One sub-query failing (nav error/timeout) shouldn't kill the
+      // whole search — move on to the next category.
+    } finally {
+      await listPage.close().catch(() => {})
+    }
+  }
+
+  return { listings, isExpanded }
+}
+
+function toLead(raw, index) {
+  const hasRating = typeof raw.rating === 'number' && !Number.isNaN(raw.rating)
+  const rating = hasRating ? raw.rating : null
+  const reputation = classifyReputation(rating)
+
+  const isHotLead = !raw.hasWebsite && hasRating && rating >= REPUTATION_THRESHOLDS.good
+  const isReputationRisk = !raw.hasWebsite && hasRating && rating < 3.5
+
+  return {
+    id: `${Date.now()}-${index}`,
+    name: raw.name,
+    phone: raw.phone || 'No phone listed',
+    address: raw.address || '',
+    category: raw.category || '',
+    openStatus: raw.openStatus || '',
+    status: raw.hasWebsite ? 'Has Website' : 'No Website Found',
+    hasWebsite: raw.hasWebsite,
+    website: raw.website || '',
+    rating,
+    reviewCount: raw.reviewCount,
+    reputation,
+    isHotLead,
+    isReputationRisk,
+    mapsUrl: raw.href
+  }
+}
+
 export async function scrapeLeads(query, maxResults = 20, onProgress) {
   // Clamp to a sane range but otherwise respect exactly what the user asked
   // for. If Google Maps doesn't actually have that many results, we return
   // everything we genuinely found instead of padding or over-promising.
   const desired = Math.max(1, Math.min(500, Number(maxResults) || 20))
+  const subQueries = expandQuery(query)
 
   const browser = await chromium.launch({ headless: true })
   const context = await browser.newContext({
@@ -390,55 +408,12 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
   })
 
   try {
-    const subQueries = expandQuery(query)
-    const isExpanded = subQueries.length > 1
-    const listings = []
-    const seenHrefs = new Set()
-
-    for (let i = 0; i < subQueries.length && listings.length < desired; i += 1) {
-      const subQuery = subQueries[i]
-      const listPage = await context.newPage()
-      const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(subQuery)}?hl=en`
-
-      onProgress?.({
-        phase: 'searching',
-        message: isExpanded
-          ? `"${query}" has no business type, so we're broadening the search — trying "${subQuery}" (${i + 1}/${subQueries.length})…`
-          : `Opening Google Maps for "${subQuery}"…`
-      })
-
-      try {
-        await listPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
-
-        if (await isBlockedPage(listPage)) {
-          await listPage.close()
-          // If we already have some results from earlier sub-queries, keep
-          // them rather than failing the whole search over one rate limit.
-          if (listings.length > 0) break
-          return {
-            success: false,
-            error: 'Google temporarily rate-limited this search. Wait a bit and try again.'
-          }
-        }
-
-        await dismissConsentIfPresent(listPage)
-        await listPage.waitForTimeout(2500)
-
-        const remaining = desired - listings.length
-        const found = await collectListingUrls(listPage, remaining, onProgress)
-        for (const item of found) {
-          if (seenHrefs.has(item.href)) continue
-          seenHrefs.add(item.href)
-          listings.push(item)
-          if (listings.length >= desired) break
-        }
-      } catch {
-        // One sub-query failing (nav error/timeout) shouldn't kill the
-        // whole search — move on to the next category.
-      } finally {
-        await listPage.close().catch(() => {})
-      }
-    }
+    const { listings, isExpanded } = await discoverListings(
+      context,
+      subQueries,
+      desired,
+      onProgress
+    )
 
     if (listings.length === 0) {
       return {
@@ -465,33 +440,7 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
 
     const succeeded = detailResults.filter((r) => r.success)
     const failedCount = detailResults.length - succeeded.length
-
-    const leads = succeeded.map((lead, index) => {
-      const hasRating = typeof lead.rating === 'number' && !Number.isNaN(lead.rating)
-      const rating = hasRating ? lead.rating : null
-      const reputation = classifyReputation(rating)
-
-      const isHotLead = !lead.hasWebsite && hasRating && rating >= REPUTATION_THRESHOLDS.good
-      const isReputationRisk = !lead.hasWebsite && hasRating && rating < 3.5
-
-      return {
-        id: `${Date.now()}-${index}`,
-        name: lead.name,
-        phone: lead.phone || 'No phone listed',
-        address: lead.address || '',
-        category: lead.category || '',
-        openStatus: lead.openStatus || '',
-        status: lead.hasWebsite ? 'Has Website' : 'No Website Found',
-        hasWebsite: lead.hasWebsite,
-        website: lead.website || '',
-        rating,
-        reviewCount: lead.reviewCount,
-        reputation,
-        isHotLead,
-        isReputationRisk,
-        mapsUrl: lead.href
-      }
-    })
+    const leads = succeeded.map(toLead)
 
     onProgress?.({ phase: 'done', total: leads.length })
 
