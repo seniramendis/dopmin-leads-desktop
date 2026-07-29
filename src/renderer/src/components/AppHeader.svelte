@@ -1,17 +1,15 @@
-<script>
-  import logo from '../assets/dopmin-logo.png'
-</script>
+<script></script>
 
 <header class="topbar">
-  <div class="brand">
-    <img class="brand-mark" src={logo} alt="Dopmin logo" />
-    <div>
-      <div class="brand-name">Dopmin Web Scraper</div>
-      <div class="brand-sub">Local lead extraction, without the noise</div>
-    </div>
+  <div class="topbar-title">
+    <h1>Lead Search</h1>
+    <p>Extract and qualify local business leads from Google Maps</p>
   </div>
   <div class="topbar-right">
-    <span class="workspace-pill">Workspace: Alpha</span>
+    <span class="status-pill">
+      <span class="status-dot"></span>
+      Local session
+    </span>
   </div>
 </header>
 
@@ -19,43 +17,46 @@
   .topbar {
     display: flex;
     justify-content: space-between;
+    align-items: flex-start;
+    padding-bottom: 4px;
+  }
+
+  .topbar-title h1 {
+    margin: 0 0 4px;
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--text-1);
+  }
+
+  .topbar-title p {
+    margin: 0;
+    font-size: 0.86rem;
+    color: var(--text-3);
+  }
+
+  .topbar-right {
+    padding-top: 2px;
+  }
+
+  .status-pill {
+    display: inline-flex;
     align-items: center;
-    padding-bottom: 8px;
-  }
-
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .brand-mark {
-    width: 40px;
-    height: 40px;
-    border-radius: 12px;
-    object-fit: cover;
-    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
-  }
-
-  .brand-name {
-    font-weight: 800;
-    font-size: 1.15rem;
-    color: #0f172a;
-  }
-
-  .brand-sub {
-    font-size: 0.8rem;
-    color: #64748b;
-  }
-
-  .workspace-pill {
-    background: #eef2ff;
-    color: #4338ca;
-    border: 1px solid #e0e7ff;
+    gap: 6px;
+    background: var(--surface);
+    color: var(--text-2);
+    border: 1px solid var(--border);
     padding: 6px 12px;
     border-radius: 999px;
-    font-size: 0.75rem;
+    font-size: 0.76rem;
     font-weight: 600;
-    letter-spacing: 0.02em;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    flex-shrink: 0;
   }
 </style>

@@ -14,7 +14,7 @@
     <span>{progressMessage || 'Opening Google Maps…'}</span>
   {:else if progressPhase === 'discovering'}
     <span
-      >Indexing businesses in the area… found {discoveredCount} so far (target {desiredCount})</span
+      >Indexing businesses in the area — found {discoveredCount} so far (target {desiredCount})</span
     >
   {:else if progressPhase === 'extracting'}
     <span
@@ -31,29 +31,30 @@
 <style>
   .status-banner {
     padding: 12px 16px;
-    border-radius: 10px;
-    background: #eff6ff;
-    color: #1d4ed8;
-    border: 1px solid #bfdbfe;
+    border-radius: var(--radius-sm);
+    background: var(--surface-soft);
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    font-size: 0.86rem;
   }
 
   .progress-banner {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 9px;
   }
 
   .progress-track {
     width: 100%;
-    height: 8px;
+    height: 6px;
     border-radius: 999px;
-    background: #dbeafe;
+    background: var(--border);
     overflow: hidden;
   }
 
   .progress-fill {
     height: 100%;
-    background: linear-gradient(135deg, #3b82f6, #6366f1);
+    background: var(--brand);
     border-radius: 999px;
     transition: width 0.3s ease;
   }

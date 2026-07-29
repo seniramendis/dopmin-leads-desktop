@@ -1,5 +1,5 @@
 <script>
-  import { stars, summarizeLead } from '../lib/format'
+  import { formatRating, summarizeLead } from '../lib/format'
 
   export let title
   export let tag
@@ -33,12 +33,11 @@
         {#each leads.slice(0, 8) as lead (lead.id)}
           <tr>
             <td>{lead.name}</td>
-            <td class="stars-cell" class:risk={variant === 'red'}>{stars(lead.rating)}</td>
-            <td>{lead.reviewCount}</td>
-            <td>
-              <button class="icon-btn" on:click={() => copyLead(lead)} title="Copy details"
-                >⧉</button
-              >
+            <td class="rating-cell" class:risk={variant === 'red'}>{formatRating(lead.rating)}</td
+            >
+            <td class="muted-cell">{lead.reviewCount}</td>
+            <td class="action-cell">
+              <button class="text-btn" on:click={() => copyLead(lead)}>Copy</button>
             </td>
           </tr>
         {/each}
@@ -49,46 +48,50 @@
 
 <style>
   .panel {
-    background: #ffffff;
-    border-radius: 16px;
-    padding: 18px;
-    border: 1px solid #e2e8f0;
-    border-top: 3px solid #cbd5e1;
+    background: var(--surface);
+    border-radius: var(--radius-md);
+    padding: 18px 20px;
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--border);
   }
 
   .panel-green {
-    border-top-color: #22c55e;
+    border-top-color: var(--green);
   }
 
   .panel-red {
-    border-top-color: #ef4444;
+    border-top-color: var(--red);
   }
 
   .panel-header {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 10px;
     margin-bottom: 12px;
   }
 
   .panel-header h2 {
     margin: 0;
-    font-size: 1.05rem;
+    font-size: 0.98rem;
+    font-weight: 700;
+    color: var(--text-1);
   }
 
   .panel-tag {
-    font-size: 0.72rem;
-    font-weight: 700;
+    font-size: 0.7rem;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: #64748b;
-    background: #f1f5f9;
-    padding: 3px 8px;
+    color: var(--text-3);
+    background: var(--surface-soft);
+    border: 1px solid var(--border-soft);
+    padding: 3px 9px;
     border-radius: 999px;
   }
 
   .empty-note {
-    color: #94a3b8;
+    color: var(--text-3);
     font-size: 0.85rem;
     margin: 8px 0 4px;
   }
@@ -100,34 +103,49 @@
 
   th,
   td {
-    padding: 10px 8px;
+    padding: 10px 6px;
     text-align: left;
-    border-bottom: 1px solid #eef2f6;
-    font-size: 0.88rem;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 0.86rem;
+    color: var(--text-1);
   }
 
   th {
-    color: #94a3b8;
-    font-size: 0.72rem;
+    color: var(--text-3);
+    font-size: 0.7rem;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.05em;
   }
 
-  .stars-cell {
-    color: #16a34a;
-    letter-spacing: 1px;
+  .muted-cell {
+    color: var(--text-2);
   }
 
-  .stars-cell.risk {
-    color: #dc2626;
+  .rating-cell {
+    font-weight: 700;
+    color: var(--green-dark);
   }
 
-  .icon-btn {
-    border: 1px solid #e2e8f0;
-    background: #f8fafc;
-    border-radius: 8px;
-    padding: 4px 8px;
+  .rating-cell.risk {
+    color: var(--red-dark);
+  }
+
+  .action-cell {
+    text-align: right;
+  }
+
+  .text-btn {
+    border: none;
+    background: none;
+    padding: 4px 2px;
     cursor: pointer;
-    color: #475569;
+    color: var(--text-3);
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  .text-btn:hover {
+    color: var(--brand);
   }
 </style>

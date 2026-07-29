@@ -9,18 +9,19 @@
 <style>
   .banner {
     padding: 12px 16px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
+    font-size: 0.86rem;
   }
 
   .banner-info {
-    background: #eff6ff;
-    color: #1d4ed8;
-    border: 1px solid #bfdbfe;
+    background: var(--surface-soft);
+    color: var(--text-2);
+    border: 1px solid var(--border);
   }
 
   .banner-error {
-    background: #fef2f2;
-    color: #b91c1c;
-    border: 1px solid #fecaca;
+    background: var(--red-soft);
+    color: var(--red-dark);
+    border: 1px solid var(--red-soft);
   }
 </style>

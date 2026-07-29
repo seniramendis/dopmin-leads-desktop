@@ -4,6 +4,16 @@
 // own — kept out of App.svelte so components can share them directly.
 
 /**
+ * Renders a 0-5 rating as a plain numeric string, e.g. "4.6" or "—" if unrated.
+ * @param {number | null | undefined} rating
+ * @returns {string}
+ */
+export function formatRating(rating) {
+  if (rating === null || rating === undefined) return '—'
+  return rating.toFixed(1)
+}
+
+/**
  * Renders a 0-5 rating as filled/empty star characters.
  * @param {number | null | undefined} rating
  * @returns {string}

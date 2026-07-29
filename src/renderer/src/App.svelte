@@ -1,6 +1,7 @@
 <script>
   import { onDestroy } from 'svelte'
   import SplashScreen from './components/SplashScreen.svelte'
+  import Sidebar from './components/Sidebar.svelte'
   import AppHeader from './components/AppHeader.svelte'
   import SearchPanel from './components/SearchPanel.svelte'
   import ProgressBanner from './components/ProgressBanner.svelte'
@@ -105,79 +106,74 @@
     <SplashScreen on:done={() => (showSplash = false)} />
   {/if}
 
-  <AppHeader />
+  <Sidebar />
 
-  <SearchPanel bind:query bind:desiredCount {isScraping} onSearch={handleSearch} />
+  <div class="content">
+    <AppHeader />
 
-  {#if errorMessage}
-    <Banner variant="error">{errorMessage}</Banner>
-  {/if}
+    <SearchPanel bind:query bind:desiredCount {isScraping} onSearch={handleSearch} />
 
-  {#if isScraping}
-    <ProgressBanner
-      {progressPhase}
-      {progressMessage}
-      {discoveredCount}
-      {desiredCount}
-      {extractDone}
-      {extractTotal}
-    />
-  {/if}
+    {#if errorMessage}
+      <Banner variant="error">{errorMessage}</Banner>
+    {/if}
 
-  {#if hasSearched && !isScraping && wasExpanded && leads.length > 0}
-    <Banner variant="info">
-      "{query}" looked like just a place name, so we broadened it across {queriesUsed.length}
-      business categories ({queriesUsed.length ? queriesUsed[0] : ''}, …) to find real listings
-      there.
-    </Banner>
-  {/if}
-
-  {#if hasSearched && !isScraping && leads.length > 0}
-    <StatsOverview
-      {totalFound}
-      {requested}
-      {truncated}
-      hotLeadsCount={hotLeads.length}
-      riskLeadsCount={riskLeads.length}
-      {noWebsiteCount}
-      totalShown={leads.length}
-    />
-
-    <section class="split-grid">
-      <LeadsPanel
-        title="High-Value Leads"
-        tag="good reviews"
-        variant="green"
-        leads={hotLeads}
-        emptyMessage="No no-website leads with strong ratings in this batch."
+    {#if isScraping}
+      <ProgressBanner
+        {progressPhase}
+        {progressMessage}
+        {discoveredCount}
+        {desiredCount}
+        {extractDone}
+        {extractTotal}
       />
-      <LeadsPanel
-        title="Reputation Rescue"
-        tag="bad reviews"
-        variant="red"
-        leads={riskLeads}
-        emptyMessage="No no-website leads with weak ratings in this batch."
-      />
-    </section>
+    {/if}
 
-    <ResultsTable {leads} {failedCount} />
-  {:else if hasSearched && !isScraping && leads.length === 0 && !errorMessage}
-    <Banner variant="info">No results found for this search. Try broadening your query.</Banner>
-  {/if}
+    {#if hasSearched && !isScraping && wasExpanded && leads.length > 0}
+      <Banner variant="info">
+        "{query}" looked like just a place name, so we broadened it across {queriesUsed.length}
+        business categories ({queriesUsed.length ? queriesUsed[0] : ''}, …) to find real listings
+        there.
+      </Banner>
+    {/if}
+
+    {#if hasSearched && !isScraping && leads.length > 0}
+      <StatsOverview
+        {totalFound}
+        {requested}
+        {truncated}
+        hotLeadsCount={hotLeads.length}
+        riskLeadsCount={riskLeads.length}
+        {noWebsiteCount}
+        totalShown={leads.length}
+      />
+
+      <section class="split-grid">
+        <LeadsPanel
+          title="High-Value Leads"
+          tag="good reviews"
+          variant="green"
+          leads={hotLeads}
+          emptyMessage="No no-website leads with strong ratings in this batch."
+        />
+        <LeadsPanel
+          title="Reputation Rescue"
+          tag="bad reviews"
+          variant="red"
+          leads={riskLeads}
+          emptyMessage="No no-website leads with weak ratings in this batch."
+        />
+      </section>
+
+      <ResultsTable {leads} {failedCount} />
+    {:else if hasSearched && !isScraping && leads.length === 0 && !errorMessage}
+      <Banner variant="info">No results found for this search. Try broadening your query.</Banner>
+    {/if}
+  </div>
 </main>
 
 <style>
   :global(body) {
     margin: 0;
-    background: #f8fafc;
-    color: #0f172a;
-    font-family:
-      Inter,
-      system-ui,
-      -apple-system,
-      BlinkMacSystemFont,
-      'Segoe UI',
-      sans-serif;
   }
 
   :global(#app) {
@@ -185,9 +181,15 @@
   }
 
   .app {
+    display: flex;
+    min-height: 100vh;
+  }
+
+  .content {
+    flex: 1;
+    margin-left: var(--sidebar-w);
     max-width: 1160px;
-    margin: 0 auto;
-    padding: 28px 24px 56px;
+    padding: 28px 32px 56px;
     display: flex;
     flex-direction: column;
     gap: 22px;

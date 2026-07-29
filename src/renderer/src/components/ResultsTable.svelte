@@ -1,5 +1,5 @@
 <script>
-  import { stars } from '../lib/format'
+  import { formatRating } from '../lib/format'
   import { buildLeadsCsv, downloadCsv } from '../lib/csv'
 
   export let leads // all leads, unfiltered
@@ -14,24 +14,24 @@
   }
 </script>
 
-<section class="results-card">
+<section class="card">
   <div class="results-header">
-    <h2>All results ({visibleLeads.length})</h2>
+    <h2>All results <span class="results-count">({visibleLeads.length})</span></h2>
     <div class="results-actions">
       <label class="filter-toggle">
         <input type="checkbox" bind:checked={onlyNoWebsite} />
         Only businesses without a website
       </label>
-      <button class="export-btn" on:click={exportToCSV}>Export CSV</button>
+      <button class="secondary-btn" on:click={exportToCSV}>Export CSV</button>
     </div>
   </div>
 
   <table class="full-table">
     <thead>
       <tr>
-        <th>Business Name</th>
+        <th>Business name</th>
         <th>Category</th>
-        <th>Phone Number</th>
+        <th>Phone number</th>
         <th>Address</th>
         <th>Rating</th>
         <th>Reviews</th>
@@ -47,17 +47,18 @@
             >
           </td>
           <td class="muted-cell">{lead.category || '—'}</td>
-          <td>{lead.phone}</td>
+          <td class="muted-cell">{lead.phone}</td>
           <td class="muted-cell address-cell">{lead.address || '—'}</td>
-          <td class="stars-cell" class:risk={lead.isReputationRisk}>{stars(lead.rating)}</td>
-          <td>{lead.reviewCount}</td>
+          <td class="rating-cell" class:risk={lead.isReputationRisk}>{formatRating(lead.rating)}</td
+          >
+          <td class="muted-cell">{lead.reviewCount}</td>
           <td>
             {#if lead.hasWebsite}
               <a class="website-link" href={lead.website} target="_blank" rel="noreferrer"
                 >Visit site</a
               >
             {:else}
-              <span class="badge badge-warn">No Website Found</span>
+              <span class="badge badge-warn">No website found</span>
             {/if}
           </td>
           <td>
@@ -85,58 +86,71 @@
 </section>
 
 <style>
-  .results-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 16px;
-    padding: 20px;
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 20px 22px;
   }
 
   .results-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 12px;
+    margin-bottom: 14px;
     flex-wrap: wrap;
     gap: 10px;
   }
 
   .results-header h2 {
     margin: 0;
-    font-size: 1.1rem;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-1);
+  }
+
+  .results-count {
+    font-weight: 500;
+    color: var(--text-3);
   }
 
   .results-actions {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 16px;
   }
 
   .filter-toggle {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
     font-size: 0.82rem;
     font-weight: 600;
-    color: #475569;
+    color: var(--text-2);
     cursor: pointer;
     user-select: none;
   }
 
   .filter-toggle input {
     padding: 0;
-    accent-color: #0f766e;
+    accent-color: var(--brand);
     cursor: pointer;
   }
 
-  .export-btn {
-    border: none;
-    border-radius: 10px;
-    padding: 10px 16px;
-    background: #0f766e;
-    color: #fff;
+  .secondary-btn {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 9px 16px;
+    background: var(--surface);
+    color: var(--text-1);
     font-weight: 600;
+    font-size: 0.86rem;
     cursor: pointer;
+  }
+
+  .secondary-btn:hover {
+    background: var(--surface-soft);
+    border-color: var(--text-3);
   }
 
   table {
@@ -148,33 +162,35 @@
   td {
     padding: 10px 8px;
     text-align: left;
-    border-bottom: 1px solid #eef2f6;
-    font-size: 0.88rem;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 0.86rem;
+    color: var(--text-1);
   }
 
   th {
-    color: #94a3b8;
-    font-size: 0.72rem;
+    color: var(--text-3);
+    font-size: 0.7rem;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.05em;
   }
 
   .lead-link {
-    color: #0f172a;
+    color: var(--text-1);
     text-decoration: none;
     font-weight: 600;
   }
 
   .lead-link:hover {
-    color: #3b82f6;
+    color: var(--brand);
     text-decoration: underline;
   }
 
   .website-link {
-    color: #0f766e;
+    color: var(--green-dark);
     font-weight: 600;
     text-decoration: none;
-    font-size: 0.85rem;
+    font-size: 0.84rem;
   }
 
   .website-link:hover {
@@ -182,7 +198,7 @@
   }
 
   .muted-cell {
-    color: #64748b;
+    color: var(--text-2);
   }
 
   .address-cell {
@@ -192,65 +208,71 @@
     text-overflow: ellipsis;
   }
 
-  .stars-cell {
-    color: #16a34a;
-    letter-spacing: 1px;
+  .rating-cell {
+    font-weight: 700;
+    color: var(--green-dark);
   }
 
-  .stars-cell.risk {
-    color: #dc2626;
+  .rating-cell.risk {
+    color: var(--red-dark);
   }
 
   .badge {
     display: inline-block;
-    padding: 4px 8px;
+    padding: 4px 9px;
     border-radius: 999px;
-    background: #f1f5f9;
-    color: #475569;
-    font-size: 0.78rem;
+    background: var(--surface-soft);
+    border: 1px solid var(--border-soft);
+    color: var(--text-2);
+    font-size: 0.76rem;
+    font-weight: 600;
   }
 
   .badge-warn {
-    background: #fff7ed;
-    color: #c2410c;
+    background: var(--yellow-soft);
+    border-color: var(--yellow-soft);
+    color: var(--yellow-dark);
   }
 
   .rep-pill {
     display: inline-block;
-    padding: 3px 9px;
+    padding: 3px 10px;
     border-radius: 999px;
-    font-size: 0.74rem;
+    font-size: 0.72rem;
     font-weight: 700;
     text-transform: capitalize;
+    border: 1px solid transparent;
   }
 
   .rep-excellent {
-    background: #dcfce7;
-    color: #15803d;
+    background: var(--green-soft);
+    color: var(--green-dark);
   }
 
   .rep-good {
-    background: #ecfccb;
-    color: #4d7c0f;
+    background: var(--green-soft);
+    color: var(--green-dark);
+    opacity: 0.85;
   }
 
   .rep-average {
-    background: #fef9c3;
-    color: #a16207;
+    background: var(--yellow-soft);
+    color: var(--yellow-dark);
   }
 
   .rep-poor {
-    background: #fee2e2;
-    color: #b91c1c;
+    background: var(--red-soft);
+    color: var(--red-dark);
   }
 
   .rep-unrated {
-    background: #f1f5f9;
-    color: #64748b;
+    background: var(--surface-soft);
+    color: var(--text-3);
+    border-color: var(--border-soft);
   }
 
   .empty-note {
-    color: #94a3b8;
+    color: var(--text-3);
     font-size: 0.85rem;
     margin: 8px 0 4px;
   }
@@ -258,6 +280,6 @@
   .failed-note {
     margin: 10px 2px 0;
     font-size: 0.8rem;
-    color: #94a3b8;
+    color: var(--text-3);
   }
 </style>
