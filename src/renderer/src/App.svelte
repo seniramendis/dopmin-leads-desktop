@@ -11,6 +11,9 @@
   let truncated = false
   let failedCount = 0
   let hasSearched = false
+  let wasExpanded = false
+  let queriesUsed = []
+  let onlyNoWebsite = true
 
   // Live progress while a search is in flight.
   let progressPhase = '' // '' | 'searching' | 'discovering' | 'extracting' | 'done'
@@ -25,6 +28,7 @@
     .filter((l) => l.isReputationRisk)
     .sort((a, b) => (a.rating ?? 5) - (b.rating ?? 5))
   $: noWebsiteCount = leads.filter((l) => !l.hasWebsite).length
+  $: visibleLeads = onlyNoWebsite ? leads.filter((l) => !l.hasWebsite) : leads
   $: extractPercent = extractTotal > 0 ? Math.round((extractDone / extractTotal) * 100) : 0
 
   function resetProgress() {
@@ -71,6 +75,8 @@
         requested = response.requested ?? count
         truncated = Boolean(response.truncated)
         failedCount = response.failedCount ?? 0
+        wasExpanded = Boolean(response.expanded)
+        queriesUsed = response.queriesUsed ?? []
       } else {
         errorMessage = response.error || 'Failed to fetch leads.'
       }
@@ -95,7 +101,7 @@
   }
 
   function exportToCSV() {
-    if (!leads.length) return
+    if (!visibleLeads.length) return
 
     const header = [
       'Business Name',
@@ -111,7 +117,7 @@
     ]
     const rows = [
       header.join(','),
-      ...leads.map((lead) =>
+      ...visibleLeads.map((lead) =>
         [
           `"${lead.name}"`,
           `"${lead.phone}"`,
@@ -199,7 +205,8 @@
           Math.min(500, Math.floor(Number(desiredCount)) || 30)
         )}
         unique businesses. If fewer genuinely exist for this search, we'll show everything we found instead
-        of padding the list.
+        of padding the list. Just a city or town name (no business type) also works — we'll automatically
+        search it across common local business categories for you.
       </p>
     </div>
   </section>
@@ -226,6 +233,13 @@
       {:else}
         <span>Finishing up…</span>
       {/if}
+    </div>
+  {/if}
+
+  {#if hasSearched && !isScraping && wasExpanded && leads.length > 0}
+    <div class="status-banner">
+      "{query}" looked like just a place name, so we broadened it across {queriesUsed.length}
+      business categories ({queriesUsed.length ? queriesUsed[0] : ''}, …) to find real listings there.
     </div>
   {/if}
 
@@ -333,8 +347,14 @@
 
     <section class="results-card">
       <div class="results-header">
-        <h2>All results ({leads.length})</h2>
-        <button class="export-btn" on:click={exportToCSV}>Export CSV</button>
+        <h2>All results ({visibleLeads.length})</h2>
+        <div class="results-actions">
+          <label class="filter-toggle">
+            <input type="checkbox" bind:checked={onlyNoWebsite} />
+            Only businesses without a website
+          </label>
+          <button class="export-btn" on:click={exportToCSV}>Export CSV</button>
+        </div>
       </div>
 
       <table class="full-table">
@@ -351,7 +371,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each leads as lead (lead.id)}
+          {#each visibleLeads as lead (lead.id)}
             <tr>
               <td>
                 <a class="lead-link" href={lead.mapsUrl} target="_blank" rel="noreferrer"
@@ -379,6 +399,12 @@
           {/each}
         </tbody>
       </table>
+      {#if visibleLeads.length === 0}
+        <p class="empty-note">
+          No businesses without a website in this batch. Uncheck the filter above to see all
+          {leads.length} results.
+        </p>
+      {/if}
       {#if failedCount > 0}
         <p class="failed-note">
           {failedCount}
@@ -746,6 +772,29 @@
   .results-header h2 {
     margin: 0;
     font-size: 1.1rem;
+  }
+
+  .results-actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .filter-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #475569;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .filter-toggle input {
+    padding: 0;
+    accent-color: #0f766e;
+    cursor: pointer;
   }
 
   .export-btn {

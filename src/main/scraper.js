@@ -34,6 +34,71 @@ const MAX_DETAIL_RETRIES = 2
 
 const NAV_TIMEOUT_MS = 30000
 
+// Words that signal the user already told us what KIND of business they
+// want (e.g. "restaurants in Kandy", "hardware stores near Galle"). If a
+// query contains none of these, it's almost certainly just a place name
+// ("Mount Lavinia", "Kalutara town") — and Google Maps returns weak/empty
+// results for a bare place with no category, so we expand it ourselves.
+const BUSINESS_TYPE_HINTS = [
+  'store', 'stores', 'shop', 'shops', 'restaurant', 'restaurants', 'hotel',
+  'hotels', 'salon', 'salons', 'spa', 'garage', 'mechanic', 'clinic',
+  'clinics', 'hospital', 'pharmacy', 'pharmacies', 'bakery', 'bakeries',
+  'gym', 'gyms', 'dealer', 'dealers', 'agency', 'agencies', 'firm', 'firms',
+  'service', 'services', 'repair', 'market', 'supermarket', 'supermarkets',
+  'cafe', 'cafes', 'bar', 'bars', 'school', 'schools', 'boutique',
+  'workshop', 'electrician', 'electricians', 'plumber', 'plumbers',
+  'lawyer', 'lawyers', 'accountant', 'accountants', 'contractor',
+  'contractors', 'furniture', 'electronics', 'grocery', 'groceries',
+  'bank', 'banks', 'jewel', 'jeweller', 'jewelers', 'tailor', 'tailors',
+  'printer', 'printers', 'photographer', 'photographers', 'apartments',
+  'real estate', 'realtor', 'realtors', 'clothing', 'wear', 'mobile',
+  'phone', 'computer', 'computers', 'hardware', 'construction'
+]
+
+// Default set of categories we fan a bare place name out into. Kept broad
+// and locally-relevant (Sri Lankan small-business landscape) rather than
+// exhaustive, since the loop below stops as soon as enough leads are found
+// — later categories only run if earlier ones didn't fill the quota.
+const DEFAULT_CATEGORY_EXPANSION = [
+  'restaurants',
+  'hotels',
+  'shops',
+  'supermarkets',
+  'pharmacies',
+  'hardware stores',
+  'salons',
+  'auto repair shops',
+  'electronics stores',
+  'clothing stores',
+  'bakeries',
+  'clinics',
+  'gyms',
+  'furniture stores',
+  'law firms',
+  'real estate agents',
+  'construction companies',
+  'schools',
+  'grocery stores',
+  'mobile phone shops'
+]
+
+function looksLikeBarePlaceName(query) {
+  const q = query.toLowerCase()
+  return !BUSINESS_TYPE_HINTS.some((hint) => q.includes(hint))
+}
+
+/** Turns a single user query into a list of queries to actually run against
+ * Google Maps. If the user already specified a business type, we run
+ * exactly that one query unchanged. If it looks like a bare city/town name,
+ * we fan it out into "<category> in <place>" for a broad set of common
+ * local business categories, so a search like "Mount Lavinia" alone still
+ * turns up real businesses instead of a near-empty result. */
+function expandQuery(query) {
+  const trimmed = query.trim()
+  if (!looksLikeBarePlaceName(trimmed)) return [trimmed]
+  return DEFAULT_CATEGORY_EXPANSION.map((category) => `${category} in ${trimmed}`)
+}
+
 function classifyReputation(rating) {
   if (rating === null || Number.isNaN(rating)) return 'unrated'
   if (rating >= REPUTATION_THRESHOLDS.excellent) return 'excellent'
@@ -325,25 +390,55 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
   })
 
   try {
-    const listPage = await context.newPage()
-    const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}?hl=en`
+    const subQueries = expandQuery(query)
+    const isExpanded = subQueries.length > 1
+    const listings = []
+    const seenHrefs = new Set()
 
-    onProgress?.({ phase: 'searching', message: `Opening Google Maps for "${query}"…` })
-    await listPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    for (let i = 0; i < subQueries.length && listings.length < desired; i += 1) {
+      const subQuery = subQueries[i]
+      const listPage = await context.newPage()
+      const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(subQuery)}?hl=en`
 
-    if (await isBlockedPage(listPage)) {
-      await listPage.close()
-      return {
-        success: false,
-        error: 'Google temporarily rate-limited this search. Wait a bit and try again.'
+      onProgress?.({
+        phase: 'searching',
+        message: isExpanded
+          ? `"${query}" has no business type, so we're broadening the search — trying "${subQuery}" (${i + 1}/${subQueries.length})…`
+          : `Opening Google Maps for "${subQuery}"…`
+      })
+
+      try {
+        await listPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+
+        if (await isBlockedPage(listPage)) {
+          await listPage.close()
+          // If we already have some results from earlier sub-queries, keep
+          // them rather than failing the whole search over one rate limit.
+          if (listings.length > 0) break
+          return {
+            success: false,
+            error: 'Google temporarily rate-limited this search. Wait a bit and try again.'
+          }
+        }
+
+        await dismissConsentIfPresent(listPage)
+        await listPage.waitForTimeout(2500)
+
+        const remaining = desired - listings.length
+        const found = await collectListingUrls(listPage, remaining, onProgress)
+        for (const item of found) {
+          if (seenHrefs.has(item.href)) continue
+          seenHrefs.add(item.href)
+          listings.push(item)
+          if (listings.length >= desired) break
+        }
+      } catch {
+        // One sub-query failing (nav error/timeout) shouldn't kill the
+        // whole search — move on to the next category.
+      } finally {
+        await listPage.close().catch(() => {})
       }
     }
-
-    await dismissConsentIfPresent(listPage)
-    await listPage.waitForTimeout(2500)
-
-    const listings = await collectListingUrls(listPage, desired, onProgress)
-    await listPage.close()
 
     if (listings.length === 0) {
       return {
@@ -352,7 +447,9 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
         requested: desired,
         totalFound: 0,
         truncated: false,
-        failedCount: 0
+        failedCount: 0,
+        expanded: isExpanded,
+        queriesUsed: subQueries
       }
     }
 
@@ -404,7 +501,9 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
       requested: desired,
       totalFound: listings.length, // how many unique businesses were actually found
       truncated: listings.length > desired, // true if more exist beyond what was returned
-      failedCount // listings that couldn't be read even after retries
+      failedCount, // listings that couldn't be read even after retries
+      expanded: isExpanded, // true if we broadened a bare place name into categories
+      queriesUsed: subQueries
     }
   } catch (error) {
     return { success: false, error: error.message }
