@@ -52,7 +52,7 @@ function registerIpcHandlers() {
     return true
   })
 
-  ipcMain.handle('start-scraping', async (_event, searchData = {}) => {
+  ipcMain.handle('start-scraping', async (event, searchData = {}) => {
     const query = typeof searchData === 'string' ? searchData : searchData.query || ''
     const rawMaxResults = typeof searchData === 'string' ? 20 : (searchData.maxResults ?? 20)
     const maxResults = Math.max(1, Math.min(500, Number(rawMaxResults) || 20))
@@ -66,7 +66,20 @@ function registerIpcHandlers() {
       console.warn('No API key configured yet — set one in Settings.')
     }
 
-    return scrapeLeads(query, Number(maxResults))
+    // Stream live progress (discovery scrolling + per-listing extraction)
+    // back to the renderer so long searches (100s of results) give
+    // real-time feedback instead of a single spinner.
+    const onProgress = (payload) => {
+      try {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('scrape-progress', payload)
+        }
+      } catch {
+        // Window may have closed mid-scrape — safe to ignore.
+      }
+    }
+
+    return scrapeLeads(query, Number(maxResults), onProgress)
   })
 }
 

@@ -1,4 +1,6 @@
 <script>
+  import { onDestroy } from 'svelte'
+
   let query = 'hardware stores in Mount Lavinia'
   let desiredCount = 30
   let leads = []
@@ -7,13 +9,43 @@
   let totalFound = 0
   let requested = 0
   let truncated = false
+  let failedCount = 0
   let hasSearched = false
+
+  // Live progress while a search is in flight.
+  let progressPhase = '' // '' | 'searching' | 'discovering' | 'extracting' | 'done'
+  let progressMessage = ''
+  let discoveredCount = 0
+  let extractDone = 0
+  let extractTotal = 0
+  let unsubscribeProgress = null
 
   $: hotLeads = leads.filter((l) => l.isHotLead).sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
   $: riskLeads = leads
     .filter((l) => l.isReputationRisk)
     .sort((a, b) => (a.rating ?? 5) - (b.rating ?? 5))
   $: noWebsiteCount = leads.filter((l) => !l.hasWebsite).length
+  $: extractPercent = extractTotal > 0 ? Math.round((extractDone / extractTotal) * 100) : 0
+
+  function resetProgress() {
+    progressPhase = ''
+    progressMessage = ''
+    discoveredCount = 0
+    extractDone = 0
+    extractTotal = 0
+  }
+
+  function handleProgress(payload) {
+    progressPhase = payload.phase
+    if (payload.phase === 'searching') {
+      progressMessage = payload.message || 'Opening Google Maps…'
+    } else if (payload.phase === 'discovering') {
+      discoveredCount = payload.found ?? discoveredCount
+    } else if (payload.phase === 'extracting') {
+      extractDone = payload.done ?? extractDone
+      extractTotal = payload.total ?? extractTotal
+    }
+  }
 
   async function handleSearch() {
     if (!query.trim() || isScraping) return
@@ -22,9 +54,14 @@
     errorMessage = ''
     leads = []
     hasSearched = true
+    resetProgress()
 
     const count = Math.max(1, Math.min(500, Math.floor(Number(desiredCount)) || 30))
     desiredCount = count
+
+    if (!unsubscribeProgress && window.api.onScrapeProgress) {
+      unsubscribeProgress = window.api.onScrapeProgress(handleProgress)
+    }
 
     try {
       const response = await window.api.startScraping({ query, maxResults: count })
@@ -33,6 +70,7 @@
         totalFound = response.totalFound ?? response.leads.length
         requested = response.requested ?? count
         truncated = Boolean(response.truncated)
+        failedCount = response.failedCount ?? 0
       } else {
         errorMessage = response.error || 'Failed to fetch leads.'
       }
@@ -40,8 +78,13 @@
       errorMessage = err.message || 'Scraping failed.'
     } finally {
       isScraping = false
+      resetProgress()
     }
   }
+
+  onDestroy(() => {
+    unsubscribeProgress?.()
+  })
 
   function copyToClipboard(text) {
     navigator.clipboard?.writeText(text)
@@ -57,10 +100,14 @@
     const header = [
       'Business Name',
       'Phone Number',
+      'Category',
+      'Address',
       'Rating',
       'Reviews',
       'Website Status',
-      'Reputation'
+      'Website',
+      'Reputation',
+      'Maps URL'
     ]
     const rows = [
       header.join(','),
@@ -68,10 +115,14 @@
         [
           `"${lead.name}"`,
           `"${lead.phone}"`,
+          `"${lead.category || ''}"`,
+          `"${lead.address || ''}"`,
           lead.rating ?? '',
           lead.reviewCount ?? 0,
           `"${lead.status}"`,
-          `"${lead.reputation}"`
+          `"${lead.website || ''}"`,
+          `"${lead.reputation}"`,
+          `"${lead.mapsUrl || ''}"`
         ].join(',')
       )
     ]
@@ -158,7 +209,24 @@
   {/if}
 
   {#if isScraping}
-    <div class="status-banner">Opening a headless browser and scanning Google Maps results…</div>
+    <div class="status-banner progress-banner">
+      {#if progressPhase === 'searching' || !progressPhase}
+        <span>{progressMessage || 'Opening Google Maps…'}</span>
+      {:else if progressPhase === 'discovering'}
+        <span
+          >Indexing businesses in the area… found {discoveredCount} so far (target {desiredCount})</span
+        >
+      {:else if progressPhase === 'extracting'}
+        <span
+          >Reading business details — phone numbers, websites, addresses… {extractDone} / {extractTotal}</span
+        >
+        <div class="progress-track">
+          <div class="progress-fill" style="width: {extractPercent}%"></div>
+        </div>
+      {:else}
+        <span>Finishing up…</span>
+      {/if}
+    </div>
   {/if}
 
   {#if hasSearched && !isScraping && leads.length > 0}
@@ -273,7 +341,9 @@
         <thead>
           <tr>
             <th>Business Name</th>
+            <th>Category</th>
             <th>Phone Number</th>
+            <th>Address</th>
             <th>Rating</th>
             <th>Reviews</th>
             <th>Website</th>
@@ -283,12 +353,24 @@
         <tbody>
           {#each leads as lead (lead.id)}
             <tr>
-              <td>{lead.name}</td>
+              <td>
+                <a class="lead-link" href={lead.mapsUrl} target="_blank" rel="noreferrer"
+                  >{lead.name}</a
+                >
+              </td>
+              <td class="muted-cell">{lead.category || '—'}</td>
               <td>{lead.phone}</td>
+              <td class="muted-cell address-cell">{lead.address || '—'}</td>
               <td class="stars-cell" class:risk={lead.isReputationRisk}>{stars(lead.rating)}</td>
               <td>{lead.reviewCount}</td>
               <td>
-                <span class="badge" class:badge-warn={!lead.hasWebsite}>{lead.status}</span>
+                {#if lead.hasWebsite}
+                  <a class="website-link" href={lead.website} target="_blank" rel="noreferrer"
+                    >Visit site</a
+                  >
+                {:else}
+                  <span class="badge badge-warn">No Website Found</span>
+                {/if}
               </td>
               <td>
                 <span class="rep-pill rep-{lead.reputation}">{lead.reputation}</span>
@@ -297,6 +379,13 @@
           {/each}
         </tbody>
       </table>
+      {#if failedCount > 0}
+        <p class="failed-note">
+          {failedCount}
+          {failedCount === 1 ? 'listing' : 'listings'} couldn't be read (Google blocked or timed out)
+          and {failedCount === 1 ? 'was' : 'were'} skipped.
+        </p>
+      {/if}
     </section>
   {:else if hasSearched && !isScraping && leads.length === 0 && !errorMessage}
     <div class="status-banner">No results found for this search. Try broadening your query.</div>
@@ -483,6 +572,66 @@
     background: #eff6ff;
     color: #1d4ed8;
     border: 1px solid #bfdbfe;
+  }
+
+  .progress-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .progress-track {
+    width: 100%;
+    height: 8px;
+    border-radius: 999px;
+    background: #dbeafe;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(135deg, #3b82f6, #6366f1);
+    border-radius: 999px;
+    transition: width 0.3s ease;
+  }
+
+  .lead-link {
+    color: #0f172a;
+    text-decoration: none;
+    font-weight: 600;
+  }
+
+  .lead-link:hover {
+    color: #3b82f6;
+    text-decoration: underline;
+  }
+
+  .website-link {
+    color: #0f766e;
+    font-weight: 600;
+    text-decoration: none;
+    font-size: 0.85rem;
+  }
+
+  .website-link:hover {
+    text-decoration: underline;
+  }
+
+  .muted-cell {
+    color: #64748b;
+  }
+
+  .address-cell {
+    max-width: 220px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .failed-note {
+    margin: 10px 2px 0;
+    font-size: 0.8rem;
+    color: #94a3b8;
   }
 
   .stats-grid {
