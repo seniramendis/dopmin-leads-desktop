@@ -54,7 +54,8 @@ function registerIpcHandlers() {
 
   ipcMain.handle('start-scraping', async (_event, searchData = {}) => {
     const query = typeof searchData === 'string' ? searchData : searchData.query || ''
-    const maxResults = typeof searchData === 'string' ? 20 : searchData.maxResults ?? 20
+    const rawMaxResults = typeof searchData === 'string' ? 20 : (searchData.maxResults ?? 20)
+    const maxResults = Math.max(1, Math.min(500, Number(rawMaxResults) || 20))
 
     if (!query.trim()) {
       return { success: false, error: 'Please enter a search query.' }
