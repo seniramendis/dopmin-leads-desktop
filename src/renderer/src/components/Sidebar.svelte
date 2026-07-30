@@ -215,4 +215,55 @@
     color: var(--text-3);
     margin-top: 1px;
   }
+
+  /* Below this width there's no room for a fixed 232px rail alongside
+     content without clipping the data-dense views (tables, pipeline
+     board) — collapse into a horizontal top bar instead so every window
+     size stays usable rather than just visually shrinking in place. */
+  @media (max-width: 760px) {
+    .sidebar {
+      position: static;
+      width: 100%;
+      flex-direction: row;
+      align-items: center;
+      padding: 10px 14px;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      gap: 16px;
+    }
+
+    .sidebar-brand {
+      padding: 0;
+      border-bottom: none;
+      margin-bottom: 0;
+      flex-shrink: 0;
+    }
+
+    .brand-text {
+      display: none;
+    }
+
+    .nav {
+      flex: none;
+      display: flex;
+    }
+
+    .nav-section-label {
+      display: none;
+    }
+
+    .nav ul {
+      flex-direction: row;
+      gap: 4px;
+    }
+
+    .nav-item {
+      white-space: nowrap;
+    }
+
+    .sidebar-footer {
+      display: none;
+    }
+  }
 </style>

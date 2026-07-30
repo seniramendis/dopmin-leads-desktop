@@ -39,6 +39,14 @@
   --sidebar-w: 232px;
 }
 
+.disclaimer-note {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  font-style: italic;
+  line-height: 1.45;
+  margin: 0;
+}
+
 *,
 *::before,
 *::after {

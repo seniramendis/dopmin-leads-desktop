@@ -65,48 +65,50 @@
     No leads match these filters yet — run a search to start building the database.
   </p>
 {:else}
-  <table class="db-table">
-    <thead>
-      <tr>
-        <th>Name</th>
-        <th>Category</th>
-        <th>Phone</th>
-        <th>Rating</th>
-        <th>Website</th>
-        <th>First seen</th>
-        <th>Last seen</th>
-        <th>Seen ×</th>
-        <th>Status</th>
-      </tr>
-    </thead>
-    <tbody>
-      {#each leads as lead (lead.id)}
+  <div class="table-scroll">
+    <table class="db-table">
+      <thead>
         <tr>
-          <td class="name-cell">{lead.name}</td>
-          <td class="muted-cell">{lead.category || '—'}</td>
-          <td class="muted-cell">{lead.phone || '—'}</td>
-          <td>{formatRating(lead.rating)}</td>
-          <td>
-            {#if lead.has_website}
-              <span class="badge badge-ok">Has site</span>
-            {:else}
-              <span class="badge badge-warn">No site</span>
-            {/if}
-          </td>
-          <td class="muted-cell">{new Date(lead.first_seen_at).toLocaleDateString()}</td>
-          <td class="muted-cell">{new Date(lead.last_seen_at).toLocaleDateString()}</td>
-          <td class="muted-cell">{lead.times_seen}</td>
-          <td>
-            <select value={lead.status} on:change={(e) => updateStatus(lead.id, e.target.value)}>
-              {#each LEAD_STATUSES as s (s)}
-                <option value={s}>{s}</option>
-              {/each}
-            </select>
-          </td>
+          <th>Name</th>
+          <th>Category</th>
+          <th>Phone</th>
+          <th>Rating</th>
+          <th>Website</th>
+          <th>First seen</th>
+          <th>Last seen</th>
+          <th>Seen ×</th>
+          <th>Status</th>
         </tr>
-      {/each}
-    </tbody>
-  </table>
+      </thead>
+      <tbody>
+        {#each leads as lead (lead.id)}
+          <tr>
+            <td class="name-cell">{lead.name}</td>
+            <td class="muted-cell">{lead.category || '—'}</td>
+            <td class="muted-cell">{lead.phone || '—'}</td>
+            <td>{formatRating(lead.rating)}</td>
+            <td>
+              {#if lead.has_website}
+                <span class="badge badge-ok">Has site</span>
+              {:else}
+                <span class="badge badge-warn">No site</span>
+              {/if}
+            </td>
+            <td class="muted-cell">{new Date(lead.first_seen_at).toLocaleDateString()}</td>
+            <td class="muted-cell">{new Date(lead.last_seen_at).toLocaleDateString()}</td>
+            <td class="muted-cell">{lead.times_seen}</td>
+            <td>
+              <select value={lead.status} on:change={(e) => updateStatus(lead.id, e.target.value)}>
+                {#each LEAD_STATUSES as s (s)}
+                  <option value={s}>{s}</option>
+                {/each}
+              </select>
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
 
   {#if leads.length < total}
     <button class="load-more" on:click={loadMore}>
@@ -120,6 +122,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-wrap: wrap;
     margin-bottom: 10px;
   }
 
@@ -141,8 +144,14 @@
     font-size: 0.82rem;
   }
 
+  .table-scroll {
+    width: 100%;
+    overflow-x: auto;
+  }
+
   table {
     width: 100%;
+    min-width: 760px;
     border-collapse: collapse;
   }
 

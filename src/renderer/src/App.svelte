@@ -10,6 +10,7 @@
   import LeadsPanel from './components/LeadsPanel.svelte'
   import ResultsTable from './components/ResultsTable.svelte'
   import LeadDatabase from './components/LeadDatabase.svelte'
+  import Footer from './components/Footer.svelte'
 
   let showSplash = true
   let view = 'search'
@@ -193,6 +194,8 @@
         <Banner variant="info">No results found for this search. Try broadening your query.</Banner>
       {/if}
     {/if}
+
+    <Footer />
   </div>
 </main>
 
@@ -218,6 +221,7 @@
     display: flex;
     flex-direction: column;
     gap: 22px;
+    min-width: 0; /* let child tables/boards scroll instead of forcing the column to overflow */
   }
 
   .split-grid {
@@ -226,9 +230,30 @@
     gap: 16px;
   }
 
+  @media (max-width: 1000px) {
+    .content {
+      padding: 22px 20px 44px;
+    }
+  }
+
   @media (max-width: 820px) {
     .split-grid {
       grid-template-columns: 1fr;
+    }
+  }
+
+  /* Matches the Sidebar's own breakpoint where it becomes a horizontal
+     top bar instead of a fixed left rail — the content column needs to
+     stop reserving space for it at the same width. */
+  @media (max-width: 760px) {
+    .app {
+      flex-direction: column;
+    }
+
+    .content {
+      margin-left: 0;
+      max-width: 100%;
+      padding: 18px 16px 36px;
     }
   }
 </style>

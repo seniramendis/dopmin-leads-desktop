@@ -27,62 +27,77 @@
     </div>
   </div>
 
-  <table class="full-table">
-    <thead>
-      <tr>
-        <th>Business name</th>
-        <th>Category</th>
-        <th>Phone number</th>
-        <th>Address</th>
-        <th>Rating</th>
-        <th>Reviews</th>
-        <th>Website</th>
-        <th>Reputation</th>
-        <th>Outreach</th>
-      </tr>
-    </thead>
-    <tbody>
-      {#each visibleLeads as lead (lead.id)}
+  <p class="disclaimer-note">
+    "Audit site" scores are automated, heuristic checks — not a professional technical or security
+    audit. WhatsApp is a direct message to a real person: sending it is on you, so make sure you
+    have a legitimate basis to reach out and that it complies with local marketing/anti-spam rules
+    and WhatsApp's own terms of use.
+  </p>
+
+  <div class="table-scroll">
+    <table class="full-table">
+      <thead>
         <tr>
-          <td>
-            <a class="lead-link" href={lead.mapsUrl} target="_blank" rel="noreferrer">{lead.name}</a
-            >
-            {#if lead.isNew}
-              <span class="badge badge-new" title="First time this lead has been scraped">New</span>
-            {:else if lead.changes?.length}
-              <span
-                class="badge badge-changed"
-                title={lead.changes.map((c) => `${c.field}: ${c.oldVal} → ${c.newVal}`).join(' • ')}
-              >
-                Changed
-              </span>
-            {/if}
-          </td>
-          <td class="muted-cell">{lead.category || '—'}</td>
-          <td class="muted-cell">{lead.phone}</td>
-          <td class="muted-cell address-cell">{lead.address || '—'}</td>
-          <td class="rating-cell" class:risk={lead.isReputationRisk}>{formatRating(lead.rating)}</td
-          >
-          <td class="muted-cell">{lead.reviewCount}</td>
-          <td>
-            {#if lead.hasWebsite}
-              <a class="website-link" href={lead.website} target="_blank" rel="noreferrer"
-                >Visit site</a
-              >
-            {:else}
-              <span class="badge badge-warn">No website found</span>
-            {/if}
-          </td>
-          <td>
-            <span class="rep-pill rep-{lead.reputation}">{lead.reputation}</span>
-          </td>
-          <td>
-            <LeadActions {lead} />
-          </td>
+          <th>Business name</th>
+          <th>Category</th>
+          <th>Phone number</th>
+          <th>Address</th>
+          <th>Rating</th>
+          <th>Reviews</th>
+          <th>Website</th>
+          <th>Reputation</th>
+          <th>Outreach</th>
         </tr>
-      {/each}
-    </tbody>
-  </table>
+      </thead>
+      <tbody>
+        {#each visibleLeads as lead (lead.id)}
+          <tr>
+            <td>
+              <a class="lead-link" href={lead.mapsUrl} target="_blank" rel="noreferrer"
+                >{lead.name}</a
+              >
+              {#if lead.isNew}
+                <span class="badge badge-new" title="First time this lead has been scraped"
+                  >New</span
+                >
+              {:else if lead.changes?.length}
+                <span
+                  class="badge badge-changed"
+                  title={lead.changes
+                    .map((c) => `${c.field}: ${c.oldVal} → ${c.newVal}`)
+                    .join(' • ')}
+                >
+                  Changed
+                </span>
+              {/if}
+            </td>
+            <td class="muted-cell">{lead.category || '—'}</td>
+            <td class="muted-cell">{lead.phone}</td>
+            <td class="muted-cell address-cell">{lead.address || '—'}</td>
+            <td class="rating-cell" class:risk={lead.isReputationRisk}
+              >{formatRating(lead.rating)}</td
+            >
+            <td class="muted-cell">{lead.reviewCount}</td>
+            <td>
+              {#if lead.hasWebsite}
+                <a class="website-link" href={lead.website} target="_blank" rel="noreferrer"
+                  >Visit site</a
+                >
+              {:else}
+                <span class="badge badge-warn">No website found</span>
+              {/if}
+            </td>
+            <td>
+              <span class="rep-pill rep-{lead.reputation}">{lead.reputation}</span>
+            </td>
+            <td>
+              <LeadActions {lead} />
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
 
   {#if visibleLeads.length === 0}
     <p class="empty-note">
@@ -168,8 +183,19 @@
     border-color: var(--text-3);
   }
 
+  .disclaimer-note {
+    margin: 0 0 14px;
+    max-width: 760px;
+  }
+
+  .table-scroll {
+    width: 100%;
+    overflow-x: auto;
+  }
+
   table {
     width: 100%;
+    min-width: 880px;
     border-collapse: collapse;
   }
 

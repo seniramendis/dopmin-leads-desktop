@@ -45,9 +45,15 @@
   </div>
 
   <p class="search-hint">
-    We'll try to find exactly {clampedCount} unique businesses. If fewer genuinely exist, we'll show
-    everything we found instead of padding the list. A city or town name alone also works — we'll
-    expand it across common local business categories automatically.
+    We'll try to find exactly {clampedCount} unique businesses. If fewer genuinely exist, we'll show everything
+    we found instead of padding the list. A city or town name alone also works — we'll expand it across
+    common local business categories automatically.
+  </p>
+
+  <p class="disclaimer-note">
+    Results are pulled from publicly available Google Maps listings at the time of search — ratings,
+    contact details, and website status can be incomplete, out of date, or wrong. Verify a lead
+    before you rely on it for outreach or decision-making.
   </p>
 </section>
 
@@ -139,6 +145,10 @@
     font-size: 0.78rem;
     color: var(--text-3);
     max-width: 720px;
+  }
+
+  .disclaimer-note {
+    margin: 8px 2px 0;
   }
 
   .primary-btn {

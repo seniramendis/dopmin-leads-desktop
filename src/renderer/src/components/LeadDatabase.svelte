@@ -86,6 +86,13 @@
     </h2>
   </div>
 
+  <p class="disclaimer-note">
+    "Last seen" reflects the most recent time a search picked this lead up — not a live check, so a
+    business shown here could have closed, moved, or changed since then. Stored contact details are
+    for your own outreach only; keep them, use them, and eventually delete them in line with the
+    data protection rules that apply to you.
+  </p>
+
   <DbStatsBar {stats} />
 
   <DbFilterBar
@@ -135,5 +142,10 @@
     color: var(--text-3);
     font-weight: 400;
     font-size: 0.82rem;
+  }
+
+  .disclaimer-note {
+    margin: 0 0 14px;
+    max-width: 760px;
   }
 </style>
