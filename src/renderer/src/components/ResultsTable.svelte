@@ -1,6 +1,7 @@
 <script>
   import { formatRating } from '../lib/format'
   import { buildLeadsCsv, downloadCsv } from '../lib/csv'
+  import LeadActions from './LeadActions.svelte'
 
   export let leads // all leads, unfiltered
   export let failedCount
@@ -37,6 +38,7 @@
         <th>Reviews</th>
         <th>Website</th>
         <th>Reputation</th>
+        <th>Outreach</th>
       </tr>
     </thead>
     <tbody>
@@ -45,6 +47,16 @@
           <td>
             <a class="lead-link" href={lead.mapsUrl} target="_blank" rel="noreferrer">{lead.name}</a
             >
+            {#if lead.isNew}
+              <span class="badge badge-new" title="First time this lead has been scraped">New</span>
+            {:else if lead.changes?.length}
+              <span
+                class="badge badge-changed"
+                title={lead.changes.map((c) => `${c.field}: ${c.oldVal} → ${c.newVal}`).join(' • ')}
+              >
+                Changed
+              </span>
+            {/if}
           </td>
           <td class="muted-cell">{lead.category || '—'}</td>
           <td class="muted-cell">{lead.phone}</td>
@@ -63,6 +75,9 @@
           </td>
           <td>
             <span class="rep-pill rep-{lead.reputation}">{lead.reputation}</span>
+          </td>
+          <td>
+            <LeadActions {lead} />
           </td>
         </tr>
       {/each}
@@ -232,6 +247,21 @@
     background: var(--yellow-soft);
     border-color: var(--yellow-soft);
     color: var(--yellow-dark);
+  }
+
+  .badge-new {
+    background: var(--green-soft);
+    border: none;
+    color: var(--green-dark);
+    margin-left: 6px;
+  }
+
+  .badge-changed {
+    background: var(--red-soft);
+    border: none;
+    color: var(--red-dark);
+    margin-left: 6px;
+    cursor: help;
   }
 
   .rep-pill {

@@ -4,6 +4,9 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { scrapeLeads } from './scraper'
 import { getApiKey, setApiKey } from './secureStore'
+import { runZeroCostAudit } from './auditEngine'
+import { generatePitch } from './pitchGenerator'
+import { upsertLeads, listLeads, getLeadHistory, setLeadStatus, getDbStats } from './db'
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -68,7 +71,121 @@ function registerIpcHandlers() {
       }
     }
 
-    return scrapeLeads(query, maxResults, onProgress)
+    const result = await scrapeLeads(query, maxResults, onProgress)
+
+    // Persist into the local leads database (SQLite, zero cost/server) so
+    // the scrape isn't thrown away when the app closes, and so repeat
+    // scrapes of the same area surface what *changed* — a business losing
+    // its website, or a rating dropping — instead of just a flat list.
+    if (result.success && result.leads.length > 0) {
+      try {
+        const annotations = upsertLeads(result.leads, query)
+        result.leads = result.leads.map((lead) => {
+          const meta = annotations.get(lead.id)
+          return meta
+            ? { ...lead, dbId: meta.dbId, isNew: meta.isNew, changes: meta.changes, dbStatus: meta.status }
+            : lead
+        })
+      } catch (err) {
+        // Persisting is a bonus, not a requirement — a DB write failure
+        // (disk full, locked file, etc.) shouldn't break the scrape the
+        // user is actively waiting on.
+        console.error('Failed to persist leads to local database:', err.message)
+      }
+    }
+
+    return result
+  })
+
+  // Local Leads Database — the persistent, cross-search dataset. All local
+  // SQLite reads/writes, no network calls, no server, $0 at any scale.
+  ipcMain.handle('db-list-leads', (_event, filters) => {
+    try {
+      return { success: true, leads: listLeads(filters) }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('db-lead-history', (_event, leadId) => {
+    try {
+      return { success: true, history: getLeadHistory(leadId) }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('db-set-status', (_event, { leadId, status }) => {
+    try {
+      setLeadStatus(leadId, status)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('db-stats', () => {
+    try {
+      return { success: true, stats: getDbStats() }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  // Client Audit Scorecard — runs the local, $0 technical audit on one
+  // lead's website (SSL, speed, mobile-responsive, SEO/pixel, abandoned
+  // agency detection). See src/main/auditEngine.js.
+  ipcMain.handle('audit-website', async (_event, url) => {
+    try {
+      const result = await runZeroCostAudit(url)
+      return { success: true, ...result }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  // Instant Pitch Generator — feeds the lead (+ optional audit result) to
+  // Gemini's free tier and returns a ready-to-send outreach message.
+  ipcMain.handle('generate-pitch', async (_event, { lead, audit } = {}) => {
+    try {
+      const key = getApiKey()
+      const pitch = await generatePitch(lead, audit, key)
+      return { success: true, pitch }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  // WhatsApp Direct Outreach Bridge — opens the system default handler
+  // (desktop app or web.whatsapp.com) with the lead's number and a
+  // pre-filled message via WhatsApp's own "click to chat" link. No
+  // whatsapp-web.js/Baileys session, no QR pairing, no API cost — just a
+  // deep link, which is the $0 option that also can't get an account
+  // flagged for automation.
+  // Generic external-link opener for non-lead links (e.g. "get a free
+  // Gemini API key" pointing to Google AI Studio). Restricted to an
+  // allow-list of trusted domains so the renderer can never turn this into
+  // an arbitrary-URL-open primitive.
+  const ALLOWED_EXTERNAL_HOSTS = ['aistudio.google.com', 'ai.google.dev']
+  ipcMain.handle('open-external-link', (_event, url) => {
+    try {
+      const parsed = new URL(url)
+      if (!ALLOWED_EXTERNAL_HOSTS.includes(parsed.hostname)) {
+        return { success: false, error: 'Blocked: link is not on the allow-list.' }
+      }
+      shell.openExternal(url)
+      return { success: true }
+    } catch {
+      return { success: false, error: 'Invalid URL.' }
+    }
+  })
+
+  ipcMain.handle('open-whatsapp', (_event, { phone, message }) => {
+    const digits = (phone || '').replace(/[^\d]/g, '')
+    if (!digits) return { success: false, error: 'No valid phone number for this lead.' }
+    const url = `https://wa.me/${digits}${message ? `?text=${encodeURIComponent(message)}` : ''}`
+    shell.openExternal(url)
+    return { success: true }
   })
 }
 

@@ -9,8 +9,12 @@
   import StatsOverview from './components/StatsOverview.svelte'
   import LeadsPanel from './components/LeadsPanel.svelte'
   import ResultsTable from './components/ResultsTable.svelte'
+  import SettingsModal from './components/SettingsModal.svelte'
+  import LeadDatabase from './components/LeadDatabase.svelte'
 
   let showSplash = true
+  let showSettings = false
+  let view = 'search'
 
   let query = 'hardware stores in Mount Lavinia'
   let desiredCount = 30
@@ -122,38 +126,45 @@
     <SplashScreen on:done={() => (showSplash = false)} />
   {/if}
 
-  <Sidebar />
+  <Sidebar onOpenSettings={() => (showSettings = true)} {view} onNavigate={(v) => (view = v)} />
+
+  {#if showSettings}
+    <SettingsModal onClose={() => (showSettings = false)} />
+  {/if}
 
   <div class="content">
     <AppHeader />
 
-    <SearchPanel bind:query bind:desiredCount {isScraping} onSearch={handleSearch} />
+    {#if view === 'database'}
+      <LeadDatabase />
+    {:else}
+      <SearchPanel bind:query bind:desiredCount {isScraping} onSearch={handleSearch} />
 
-    {#if errorMessage}
-      <Banner variant="error">{errorMessage}</Banner>
-    {/if}
-
-    {#if isScraping}
-      <ProgressBanner
-        {progressPhase}
-        {progressMessage}
-        {discoveredCount}
-        {desiredCount}
-        {extractDone}
-        {extractTotal}
-      />
-      {#if connectionWarning}
-        <Banner variant="warning">{connectionWarning}</Banner>
+      {#if errorMessage}
+        <Banner variant="error">{errorMessage}</Banner>
       {/if}
-    {/if}
 
-    {#if hasSearched && !isScraping && wasExpanded && leads.length > 0}
-      <Banner variant="info">
-        "{query}" looked like just a place name, so we broadened it across {queriesUsed.length}
-        business categories ({queriesUsed.length ? queriesUsed[0] : ''}, …) to find real listings
-        there.
-      </Banner>
-    {/if}
+      {#if isScraping}
+        <ProgressBanner
+          {progressPhase}
+          {progressMessage}
+          {discoveredCount}
+          {desiredCount}
+          {extractDone}
+          {extractTotal}
+        />
+        {#if connectionWarning}
+          <Banner variant="warning">{connectionWarning}</Banner>
+        {/if}
+      {/if}
+
+      {#if hasSearched && !isScraping && wasExpanded && leads.length > 0}
+        <Banner variant="info">
+          "{query}" looked like just a place name, so we broadened it across {queriesUsed.length}
+          business categories ({queriesUsed.length ? queriesUsed[0] : ''}, …) to find real listings
+          there.
+        </Banner>
+      {/if}
 
     {#if hasSearched && !isScraping && leads.length > 0}
       <StatsOverview
@@ -184,8 +195,9 @@
       </section>
 
       <ResultsTable {leads} {failedCount} />
-    {:else if hasSearched && !isScraping && leads.length === 0 && !errorMessage}
-      <Banner variant="info">No results found for this search. Try broadening your query.</Banner>
+      {:else if hasSearched && !isScraping && leads.length === 0 && !errorMessage}
+        <Banner variant="info">No results found for this search. Try broadening your query.</Banner>
+      {/if}
     {/if}
   </div>
 </main>

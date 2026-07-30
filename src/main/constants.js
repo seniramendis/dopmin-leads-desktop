@@ -41,6 +41,85 @@ export const SLOW_NAV_THRESHOLD_MS = 12000
 // dead connection.
 export const MAX_CONSECUTIVE_NETWORK_FAILURES = 4
 
+// ---------------------------------------------------------------------------
+// Zero-Cost Audit Engine (auditEngine.js)
+// ---------------------------------------------------------------------------
+
+// How long we'll wait on a raw HTTP(S) request or a Playwright page load
+// before giving up and marking that check as failed/skipped.
+export const AUDIT_HTTP_TIMEOUT_MS = 6000
+export const AUDIT_NAV_TIMEOUT_MS = 15000
+
+// A site slower than this is flagged as a "Slow Load Time" issue — this is
+// the same rough threshold Google's own Core Web Vitals guidance treats as
+// a poor user experience.
+export const AUDIT_SLOW_LOAD_MS = 3000
+
+// Viewport used for the mobile-responsiveness check. 375px is the iPhone
+// SE/12/13 mini logical width — still the most common "small phone"
+// breakpoint sites break on.
+export const MOBILE_VIEWPORT = { width: 375, height: 812 }
+
+// Point deductions per issue found. Kept in one place so the scoring model
+// can be tuned without touching the audit logic itself.
+export const AUDIT_SCORE_WEIGHTS = {
+  noSsl: 25,
+  slowLoad: 20,
+  noMobile: 20,
+  noAnalytics: 10,
+  noMetaDescription: 5,
+  noTitle: 5,
+  abandonedAgency: 15
+}
+
+// Regexes used to spot "Designed by X" / "Powered by X" style footer
+// credits left behind by the agency that originally built the site. Each
+// must have exactly one capture group for the agency's display name.
+export const AGENCY_FOOTER_PATTERNS = [
+  /designed\s+(?:and\s+developed\s+)?by\s+([a-z0-9][a-z0-9 .&'-]{1,40})/i,
+  /developed\s+by\s+([a-z0-9][a-z0-9 .&'-]{1,40})/i,
+  /powered\s+by\s+([a-z0-9][a-z0-9 .&'-]{1,40})/i,
+  /built\s+by\s+([a-z0-9][a-z0-9 .&'-]{1,40})/i,
+  /website\s+by\s+([a-z0-9][a-z0-9 .&'-]{1,40})/i,
+  /a\s+([a-z0-9][a-z0-9 .&'-]{1,40})\s+production/i
+]
+
+// Analytics/tracking snippets we check the raw HTML for. If none of these
+// are present, the site has no way to measure its own traffic — a clean,
+// easy-to-explain upsell ("you're flying blind on your own website").
+export const ANALYTICS_SIGNATURES = [
+  { name: 'Google Analytics', pattern: /gtag\(['"]config['"]|google-analytics\.com|googletagmanager\.com/i },
+  { name: 'Meta Pixel', pattern: /connect\.facebook\.net.*fbevents|fbq\(['"]init['"]/i },
+  { name: 'Google Tag Manager', pattern: /googletagmanager\.com\/gtm\.js/i },
+  { name: 'Hotjar', pattern: /static\.hotjar\.com/i },
+  { name: 'TikTok Pixel', pattern: /analytics\.tiktok\.com/i }
+]
+
+// ---------------------------------------------------------------------------
+// Instant Pitch Generator (pitchGenerator.js) — Google AI Studio free tier
+// ---------------------------------------------------------------------------
+
+// gemini-2.5-flash is the current stable, free-tier-eligible text model on
+// Google AI Studio. Kept as a constant so it's a one-line change if Google
+// renames/deprecates it later.
+export const GEMINI_MODEL = 'gemini-2.5-flash'
+export const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
+
+// ---------------------------------------------------------------------------
+// Persistent Leads Database (db.js) — local SQLite, zero server, zero cost
+// ---------------------------------------------------------------------------
+
+// The CRM-style pipeline every persisted lead moves through. Kept as an
+// ordered list (not just a set) so the UI can render it as a left-to-right
+// pipeline rather than an unordered dropdown.
+export const LEAD_STATUSES = ['new', 'contacted', 'replied', 'won', 'dead']
+
+// Fields we diff on every re-scrape to build the change-history log (the
+// "Website disappeared" / "Rating dropped" signals). Keep this list small
+// and high-signal — logging every trivial field (e.g. category casing)
+// would bury the change feed in noise.
+export const TRACKED_CHANGE_FIELDS = ['hasWebsite', 'rating', 'reviewCount', 'website']
+
 // Words that signal the user already told us what KIND of business they
 // want (e.g. "restaurants in Kandy", "hardware stores near Galle"). If a
 // query contains none of these, it's almost certainly just a place name

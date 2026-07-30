@@ -24,7 +24,35 @@ const api = {
     const handler = (_event, payload) => callback(payload)
     ipcRenderer.on('scrape-progress', handler)
     return () => ipcRenderer.removeListener('scrape-progress', handler)
-  }
+  },
+
+  /** Runs the local $0 audit (SSL/speed/mobile/SEO/abandoned-agency) on a
+   * lead's website. @param {string} url */
+  auditWebsite: (url) => ipcRenderer.invoke('audit-website', url),
+
+  /** Generates a ready-to-send pitch via Gemini's free tier.
+   * @param {{ lead: object, audit?: object }} payload */
+  generatePitch: (payload) => ipcRenderer.invoke('generate-pitch', payload),
+
+  /** Opens a WhatsApp click-to-chat link pre-filled with a message.
+   * @param {{ phone: string, message?: string }} payload */
+  openWhatsapp: (payload) => ipcRenderer.invoke('open-whatsapp', payload),
+
+  /** Opens an allow-listed external link (e.g. Google AI Studio) in the
+   * system browser. @param {string} url */
+  openExternalLink: (url) => ipcRenderer.invoke('open-external-link', url),
+
+  /** Lists leads from the persistent local database.
+   * @param {{ status?: string, hasWebsite?: boolean, minRating?: number, search?: string }} filters */
+  dbListLeads: (filters) => ipcRenderer.invoke('db-list-leads', filters),
+
+  /** @param {string} leadId */
+  dbLeadHistory: (leadId) => ipcRenderer.invoke('db-lead-history', leadId),
+
+  /** @param {{ leadId: string, status: string }} payload */
+  dbSetStatus: (payload) => ipcRenderer.invoke('db-set-status', payload),
+
+  dbStats: () => ipcRenderer.invoke('db-stats')
 }
 
 if (process.contextIsolated) {

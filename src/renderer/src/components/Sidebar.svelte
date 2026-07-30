@@ -1,5 +1,9 @@
 <script>
   import logo from '../assets/logo_transparent_icon.png'
+
+  export let onOpenSettings = () => {}
+  export let view = 'search'
+  export let onNavigate = () => {}
 </script>
 
 <aside class="sidebar">
@@ -15,22 +19,40 @@
     <div class="nav-section-label">Workspace</div>
     <ul>
       <li>
-        <span class="nav-item active">
+        <button
+          class="nav-item nav-button"
+          class:active={view === 'search'}
+          on:click={() => onNavigate('search')}
+        >
           <span class="nav-dot"></span>
           Lead Search
-        </span>
+        </button>
       </li>
       <li>
-        <span class="nav-item disabled">
-          Saved Searches
-          <span class="nav-soon">Soon</span>
-        </span>
+        <button
+          class="nav-item nav-button"
+          class:active={view === 'database'}
+          on:click={() => onNavigate('database')}
+        >
+          <span class="nav-dot"></span>
+          Leads Database
+        </button>
       </li>
       <li>
         <span class="nav-item disabled">
           Reports
           <span class="nav-soon">Soon</span>
         </span>
+      </li>
+    </ul>
+
+    <div class="nav-section-label">Configure</div>
+    <ul>
+      <li>
+        <button class="nav-item nav-button" on:click={onOpenSettings}>
+          <span class="nav-dot"></span>
+          Settings (API key)
+        </button>
       </li>
     </ul>
   </nav>
@@ -131,6 +153,19 @@
     border-radius: 50%;
     background: var(--brand);
     flex-shrink: 0;
+  }
+
+  .nav-button {
+    width: 100%;
+    border: none;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .nav-button:hover {
+    background: var(--surface-soft);
   }
 
   .nav-item.disabled {
