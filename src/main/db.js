@@ -348,22 +348,77 @@ export function upsertLeads(leads, queryUsed) {
  * "My Leads Database" view (every business ever scraped, across every past
  * search), separate from the current search's results table.
  */
-export function listLeads({ status, hasWebsite, minRating, search, limit = 500 } = {}) {
+function matchesFallbackFilters(l, { status, hasWebsite, minRating, search }) {
+  if (status && l.status !== status) return false
+  if (hasWebsite === true && !l.has_website) return false
+  if (hasWebsite === false && l.has_website) return false
+  if (typeof minRating === 'number' && (l.rating ?? 0) < minRating) return false
+  if (search && search.trim()) {
+    const s = search.trim().toLowerCase()
+    if (!(l.name + ' ' + (l.category || '') + ' ' + (l.address || '')).toLowerCase().includes(s)) {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * Counts leads matching a filter set without pulling full rows — used by
+ * the pipeline board to show "N leads in this stage" per column and by the
+ * table view to show "showing X of Y" without loading Y rows to get Y.
+ */
+export function countLeads(filters = {}) {
   initDb()
   if (db.isFallback) {
-    let results = Object.values(db.data.leads || {})
-    if (status) results = results.filter((l) => l.status === status)
-    if (hasWebsite === true) results = results.filter((l) => !!l.has_website)
-    if (hasWebsite === false) results = results.filter((l) => !l.has_website)
-    if (typeof minRating === 'number') results = results.filter((l) => (l.rating ?? 0) >= minRating)
-    if (search && search.trim()) {
-      const s = search.trim().toLowerCase()
-      results = results.filter((l) =>
-        (l.name + ' ' + (l.category || '') + ' ' + (l.address || '')).toLowerCase().includes(s)
-      )
-    }
+    return Object.values(db.data.leads || {}).filter((l) => matchesFallbackFilters(l, filters))
+      .length
+  }
+
+  const { status, hasWebsite, minRating, search } = filters
+  const clauses = []
+  const params = {}
+  if (status) {
+    clauses.push('status = @status')
+    params.status = status
+  }
+  if (hasWebsite === true || hasWebsite === false) {
+    clauses.push('has_website = @hasWebsite')
+    params.hasWebsite = hasWebsite ? 1 : 0
+  }
+  if (typeof minRating === 'number') {
+    clauses.push('rating >= @minRating')
+    params.minRating = minRating
+  }
+
+  let sql
+  if (search && search.trim()) {
+    sql = `
+      SELECT COUNT(*) AS n FROM leads
+      JOIN leads_fts ON leads.id = leads_fts.id
+      WHERE leads_fts MATCH @search
+      ${clauses.length ? 'AND ' + clauses.join(' AND ') : ''}
+    `
+    params.search = `${search.trim()}*`
+  } else {
+    sql = `SELECT COUNT(*) AS n FROM leads ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}`
+  }
+  return db.prepare(sql).get(params).n
+}
+
+/**
+ * Lists persisted leads with optional filters, offset, and limit — pagination
+ * (rather than one giant fetch) is what keeps this view usable as the
+ * dataset grows into the thousands: the UI asks for a page at a time
+ * instead of shipping the whole table across the IPC bridge every load.
+ */
+export function listLeads({ status, hasWebsite, minRating, search, limit = 200, offset = 0 } = {}) {
+  initDb()
+  if (db.isFallback) {
+    let results = Object.values(db.data.leads || {}).filter((l) =>
+      matchesFallbackFilters(l, { status, hasWebsite, minRating, search })
+    )
     results.sort((a, b) => new Date(b.last_seen_at) - new Date(a.last_seen_at))
-    return results.slice(0, limit)
+    return results.slice(offset, offset + limit)
   }
 
   const clauses = []
@@ -390,7 +445,7 @@ export function listLeads({ status, hasWebsite, minRating, search, limit = 500 }
       WHERE leads_fts MATCH @search
       ${clauses.length ? 'AND ' + clauses.join(' AND ') : ''}
       ORDER BY last_seen_at DESC
-      LIMIT @limit
+      LIMIT @limit OFFSET @offset
     `
     params.search = `${search.trim()}*`
   } else {
@@ -398,10 +453,11 @@ export function listLeads({ status, hasWebsite, minRating, search, limit = 500 }
       SELECT * FROM leads
       ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}
       ORDER BY last_seen_at DESC
-      LIMIT @limit
+      LIMIT @limit OFFSET @offset
     `
   }
   params.limit = limit
+  params.offset = offset
 
   return db.prepare(sql).all(params)
 }

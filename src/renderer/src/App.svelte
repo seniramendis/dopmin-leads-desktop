@@ -9,11 +9,9 @@
   import StatsOverview from './components/StatsOverview.svelte'
   import LeadsPanel from './components/LeadsPanel.svelte'
   import ResultsTable from './components/ResultsTable.svelte'
-  import SettingsModal from './components/SettingsModal.svelte'
   import LeadDatabase from './components/LeadDatabase.svelte'
 
   let showSplash = true
-  let showSettings = false
   let view = 'search'
 
   let query = 'hardware stores in Mount Lavinia'
@@ -126,11 +124,7 @@
     <SplashScreen on:done={() => (showSplash = false)} />
   {/if}
 
-  <Sidebar onOpenSettings={() => (showSettings = true)} {view} onNavigate={(v) => (view = v)} />
-
-  {#if showSettings}
-    <SettingsModal onClose={() => (showSettings = false)} />
-  {/if}
+  <Sidebar {view} onNavigate={(v) => (view = v)} />
 
   <div class="content">
     <AppHeader />
@@ -166,35 +160,35 @@
         </Banner>
       {/if}
 
-    {#if hasSearched && !isScraping && leads.length > 0}
-      <StatsOverview
-        {totalFound}
-        {requested}
-        {truncated}
-        hotLeadsCount={hotLeads.length}
-        riskLeadsCount={riskLeads.length}
-        {noWebsiteCount}
-        totalShown={leads.length}
-      />
-
-      <section class="split-grid">
-        <LeadsPanel
-          title="High-Value Leads"
-          tag="good reviews"
-          variant="green"
-          leads={hotLeads}
-          emptyMessage="No no-website leads with strong ratings in this batch."
+      {#if hasSearched && !isScraping && leads.length > 0}
+        <StatsOverview
+          {totalFound}
+          {requested}
+          {truncated}
+          hotLeadsCount={hotLeads.length}
+          riskLeadsCount={riskLeads.length}
+          {noWebsiteCount}
+          totalShown={leads.length}
         />
-        <LeadsPanel
-          title="Reputation Rescue"
-          tag="bad reviews"
-          variant="red"
-          leads={riskLeads}
-          emptyMessage="No no-website leads with weak ratings in this batch."
-        />
-      </section>
 
-      <ResultsTable {leads} {failedCount} />
+        <section class="split-grid">
+          <LeadsPanel
+            title="High-Value Leads"
+            tag="good reviews"
+            variant="green"
+            leads={hotLeads}
+            emptyMessage="No no-website leads with strong ratings in this batch."
+          />
+          <LeadsPanel
+            title="Reputation Rescue"
+            tag="bad reviews"
+            variant="red"
+            leads={riskLeads}
+            emptyMessage="No no-website leads with weak ratings in this batch."
+          />
+        </section>
+
+        <ResultsTable {leads} {failedCount} />
       {:else if hasSearched && !isScraping && leads.length === 0 && !errorMessage}
         <Banner variant="info">No results found for this search. Try broadening your query.</Banner>
       {/if}

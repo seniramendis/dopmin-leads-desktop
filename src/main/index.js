@@ -3,10 +3,8 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { scrapeLeads } from './scraper'
-import { getApiKey, setApiKey } from './secureStore'
 import { runZeroCostAudit } from './auditEngine'
-import { generatePitch } from './pitchGenerator'
-import { upsertLeads, listLeads, getLeadHistory, setLeadStatus, getDbStats } from './db'
+import { upsertLeads, listLeads, countLeads, getLeadHistory, setLeadStatus, getDbStats } from './db'
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -38,13 +36,6 @@ function createWindow() {
 }
 
 function registerIpcHandlers() {
-  ipcMain.handle('get-api-key', () => getApiKey())
-
-  ipcMain.handle('set-api-key', (_event, key) => {
-    setApiKey(key)
-    return true
-  })
-
   ipcMain.handle('start-scraping', async (event, searchData = {}) => {
     const query = typeof searchData === 'string' ? searchData : searchData.query || ''
     const rawMaxResults = typeof searchData === 'string' ? 20 : (searchData.maxResults ?? 20)
@@ -52,10 +43,6 @@ function registerIpcHandlers() {
 
     if (!query.trim()) {
       return { success: false, error: 'Please enter a search query.' }
-    }
-
-    if (!getApiKey()) {
-      console.warn('No API key configured yet — set one in Settings.')
     }
 
     // Stream live progress (discovery scrolling + per-listing extraction)
@@ -83,7 +70,13 @@ function registerIpcHandlers() {
         result.leads = result.leads.map((lead) => {
           const meta = annotations.get(lead.id)
           return meta
-            ? { ...lead, dbId: meta.dbId, isNew: meta.isNew, changes: meta.changes, dbStatus: meta.status }
+            ? {
+                ...lead,
+                dbId: meta.dbId,
+                isNew: meta.isNew,
+                changes: meta.changes,
+                dbStatus: meta.status
+              }
             : lead
         })
       } catch (err) {
@@ -102,6 +95,14 @@ function registerIpcHandlers() {
   ipcMain.handle('db-list-leads', (_event, filters) => {
     try {
       return { success: true, leads: listLeads(filters) }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('db-count-leads', (_event, filters) => {
+    try {
+      return { success: true, count: countLeads(filters) }
     } catch (error) {
       return { success: false, error: error.message }
     }
@@ -144,42 +145,12 @@ function registerIpcHandlers() {
     }
   })
 
-  // Instant Pitch Generator — feeds the lead (+ optional audit result) to
-  // Gemini's free tier and returns a ready-to-send outreach message.
-  ipcMain.handle('generate-pitch', async (_event, { lead, audit } = {}) => {
-    try {
-      const key = getApiKey()
-      const pitch = await generatePitch(lead, audit, key)
-      return { success: true, pitch }
-    } catch (error) {
-      return { success: false, error: error.message }
-    }
-  })
-
   // WhatsApp Direct Outreach Bridge — opens the system default handler
   // (desktop app or web.whatsapp.com) with the lead's number and a
   // pre-filled message via WhatsApp's own "click to chat" link. No
   // whatsapp-web.js/Baileys session, no QR pairing, no API cost — just a
   // deep link, which is the $0 option that also can't get an account
   // flagged for automation.
-  // Generic external-link opener for non-lead links (e.g. "get a free
-  // Gemini API key" pointing to Google AI Studio). Restricted to an
-  // allow-list of trusted domains so the renderer can never turn this into
-  // an arbitrary-URL-open primitive.
-  const ALLOWED_EXTERNAL_HOSTS = ['aistudio.google.com', 'ai.google.dev']
-  ipcMain.handle('open-external-link', (_event, url) => {
-    try {
-      const parsed = new URL(url)
-      if (!ALLOWED_EXTERNAL_HOSTS.includes(parsed.hostname)) {
-        return { success: false, error: 'Blocked: link is not on the allow-list.' }
-      }
-      shell.openExternal(url)
-      return { success: true }
-    } catch {
-      return { success: false, error: 'Invalid URL.' }
-    }
-  })
-
   ipcMain.handle('open-whatsapp', (_event, { phone, message }) => {
     const digits = (phone || '').replace(/[^\d]/g, '')
     if (!digits) return { success: false, error: 'No valid phone number for this lead.' }

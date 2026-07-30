@@ -5,12 +5,6 @@
   let auditLoading = false
   let auditError = ''
 
-  let pitch = ''
-  let pitchLoading = false
-  let pitchError = ''
-  let showPitch = false
-  let copied = false
-
   const defaultMessage = () =>
     lead.hasWebsite
       ? `Hi ${lead.name}, I took a quick look at your website and spotted a few things costing you customers — want me to send over a free 1-page audit?`
@@ -40,35 +34,8 @@
     }
   }
 
-  async function generate() {
-    if (pitchLoading) return
-    pitchLoading = true
-    pitchError = ''
-    showPitch = true
-    copied = false
-    try {
-      const result = await window.api.generatePitch({ lead, audit })
-      if (result.success) {
-        pitch = result.pitch
-      } else {
-        pitchError = result.error || 'Could not generate a pitch.'
-      }
-    } catch (err) {
-      pitchError = err.message || 'Could not generate a pitch.'
-    } finally {
-      pitchLoading = false
-    }
-  }
-
   function sendWhatsapp() {
-    const message = pitch || defaultMessage()
-    window.api.openWhatsapp({ phone: lead.phone, message })
-  }
-
-  function copyPitch() {
-    navigator.clipboard?.writeText(pitch)
-    copied = true
-    setTimeout(() => (copied = false), 1500)
+    window.api.openWhatsapp({ phone: lead.phone, message: defaultMessage() })
   }
 
   $: hasPhone = /\d{7,}/.test((lead.phone || '').replace(/[^\d]/g, ''))
@@ -77,7 +44,12 @@
 <div class="actions">
   <div class="actions-row">
     {#if lead.hasWebsite}
-      <button class="chip" on:click={runAudit} disabled={auditLoading} title="Run free technical audit">
+      <button
+        class="chip"
+        on:click={runAudit}
+        disabled={auditLoading}
+        title="Run free technical audit"
+      >
         {#if auditLoading}Auditing…{:else if audit}Re-audit{:else}Audit site{/if}
       </button>
       {#if audit}
@@ -86,10 +58,6 @@
         </span>
       {/if}
     {/if}
-
-    <button class="chip" on:click={generate} disabled={pitchLoading} title="Generate an AI pitch">
-      {pitchLoading ? 'Writing…' : 'AI pitch'}
-    </button>
 
     <button
       class="chip chip-whatsapp"
@@ -111,22 +79,6 @@
         <li>{issue}</li>
       {/each}
     </ul>
-  {/if}
-
-  {#if showPitch}
-    <div class="pitch-box">
-      {#if pitchLoading}
-        <span class="muted">Generating pitch…</span>
-      {:else if pitchError}
-        <span class="inline-error">{pitchError}</span>
-      {:else}
-        <p class="pitch-text">{pitch}</p>
-        <div class="pitch-actions">
-          <button class="mini-btn" on:click={copyPitch}>{copied ? 'Copied' : 'Copy'}</button>
-          <button class="mini-btn" on:click={sendWhatsapp} disabled={!hasPhone}>Send via WhatsApp</button>
-        </div>
-      {/if}
-    </div>
   {/if}
 </div>
 
@@ -211,46 +163,5 @@
 
   .issue-list li {
     margin-bottom: 2px;
-  }
-
-  .pitch-box {
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
-    background: var(--surface-soft);
-    padding: 8px 10px;
-    max-width: 280px;
-  }
-
-  .pitch-text {
-    margin: 0 0 6px;
-    font-size: 0.78rem;
-    color: var(--text-1);
-    white-space: pre-wrap;
-  }
-
-  .pitch-actions {
-    display: flex;
-    gap: 6px;
-  }
-
-  .mini-btn {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--surface);
-    padding: 4px 8px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    cursor: pointer;
-    color: var(--text-1);
-  }
-
-  .mini-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  .muted {
-    font-size: 0.76rem;
-    color: var(--text-3);
   }
 </style>

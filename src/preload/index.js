@@ -9,12 +9,6 @@ const api = {
   /** @param {{ query: string, maxResults?: number }} searchData */
   startScraping: (searchData) => ipcRenderer.invoke('start-scraping', searchData),
 
-  /** @returns {Promise<string>} */
-  getApiKey: () => ipcRenderer.invoke('get-api-key'),
-
-  /** @param {string} key */
-  setApiKey: (key) => ipcRenderer.invoke('set-api-key', key),
-
   /**
    * Subscribe to live progress while a search is running.
    * @param {(payload: object) => void} callback
@@ -30,21 +24,17 @@ const api = {
    * lead's website. @param {string} url */
   auditWebsite: (url) => ipcRenderer.invoke('audit-website', url),
 
-  /** Generates a ready-to-send pitch via Gemini's free tier.
-   * @param {{ lead: object, audit?: object }} payload */
-  generatePitch: (payload) => ipcRenderer.invoke('generate-pitch', payload),
-
   /** Opens a WhatsApp click-to-chat link pre-filled with a message.
    * @param {{ phone: string, message?: string }} payload */
   openWhatsapp: (payload) => ipcRenderer.invoke('open-whatsapp', payload),
 
-  /** Opens an allow-listed external link (e.g. Google AI Studio) in the
-   * system browser. @param {string} url */
-  openExternalLink: (url) => ipcRenderer.invoke('open-external-link', url),
-
-  /** Lists leads from the persistent local database.
-   * @param {{ status?: string, hasWebsite?: boolean, minRating?: number, search?: string }} filters */
+  /** Lists leads from the persistent local database (paginated).
+   * @param {{ status?: string, hasWebsite?: boolean, minRating?: number, search?: string, limit?: number, offset?: number }} filters */
   dbListLeads: (filters) => ipcRenderer.invoke('db-list-leads', filters),
+
+  /** Counts leads matching a filter set, without fetching rows.
+   * @param {{ status?: string, hasWebsite?: boolean, minRating?: number, search?: string }} filters */
+  dbCountLeads: (filters) => ipcRenderer.invoke('db-count-leads', filters),
 
   /** @param {string} leadId */
   dbLeadHistory: (leadId) => ipcRenderer.invoke('db-lead-history', leadId),

@@ -1,7 +1,6 @@
 <script>
   import logo from '../assets/logo_transparent_icon.png'
 
-  export let onOpenSettings = () => {}
   export let view = 'search'
   export let onNavigate = () => {}
 </script>
@@ -43,16 +42,6 @@
           Reports
           <span class="nav-soon">Soon</span>
         </span>
-      </li>
-    </ul>
-
-    <div class="nav-section-label">Configure</div>
-    <ul>
-      <li>
-        <button class="nav-item nav-button" on:click={onOpenSettings}>
-          <span class="nav-dot"></span>
-          Settings (API key)
-        </button>
       </li>
     </ul>
   </nav>

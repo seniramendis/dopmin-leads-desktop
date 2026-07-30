@@ -88,22 +88,15 @@ export const AGENCY_FOOTER_PATTERNS = [
 // are present, the site has no way to measure its own traffic — a clean,
 // easy-to-explain upsell ("you're flying blind on your own website").
 export const ANALYTICS_SIGNATURES = [
-  { name: 'Google Analytics', pattern: /gtag\(['"]config['"]|google-analytics\.com|googletagmanager\.com/i },
+  {
+    name: 'Google Analytics',
+    pattern: /gtag\(['"]config['"]|google-analytics\.com|googletagmanager\.com/i
+  },
   { name: 'Meta Pixel', pattern: /connect\.facebook\.net.*fbevents|fbq\(['"]init['"]/i },
   { name: 'Google Tag Manager', pattern: /googletagmanager\.com\/gtm\.js/i },
   { name: 'Hotjar', pattern: /static\.hotjar\.com/i },
   { name: 'TikTok Pixel', pattern: /analytics\.tiktok\.com/i }
 ]
-
-// ---------------------------------------------------------------------------
-// Instant Pitch Generator (pitchGenerator.js) — Google AI Studio free tier
-// ---------------------------------------------------------------------------
-
-// gemini-2.5-flash is the current stable, free-tier-eligible text model on
-// Google AI Studio. Kept as a constant so it's a one-line change if Google
-// renames/deprecates it later.
-export const GEMINI_MODEL = 'gemini-2.5-flash'
-export const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 
 // ---------------------------------------------------------------------------
 // Persistent Leads Database (db.js) — local SQLite, zero server, zero cost
