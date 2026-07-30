@@ -15,9 +15,15 @@ export const REPUTATION_THRESHOLDS = {
 }
 
 // How many place detail pages we read at once. Higher = faster, but more
-// likely to trip Google's rate limiting on very large runs. 6 is a good
-// balance for a single headless browser instance.
-export const DETAIL_CONCURRENCY = 6
+// likely to trip Google's rate limiting on very large runs. Raised from 6
+// now that resource blocking (images/fonts/media/stylesheets) keeps each
+// tab's CPU/RAM footprint low enough to support more parallel tabs safely.
+export const DETAIL_CONCURRENCY = 10
+
+// How many category sub-queries (from query expansion) we run at once
+// during discovery. Kept modest since these are full search-page loads
+// against the same Google session, not lightweight detail pages.
+export const DISCOVERY_CONCURRENCY = 3
 
 // Retries per listing if a detail page fails to load or times out.
 export const MAX_DETAIL_RETRIES = 2

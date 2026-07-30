@@ -21,10 +21,45 @@ import { chromium } from 'playwright'
 import {
   REPUTATION_THRESHOLDS,
   DETAIL_CONCURRENCY,
+  DISCOVERY_CONCURRENCY,
   MAX_DETAIL_RETRIES,
   NAV_TIMEOUT_MS
 } from './constants'
 import { expandQuery } from './queryExpansion'
+
+/** Blocks images/fonts/media/stylesheets on every request this context
+ * makes. None of the data we read (aria-labels, data-item-id attributes,
+ * innerText) depends on CSS or images actually rendering, so this is pure
+ * bandwidth/CPU waste for a scraper. Cuts page weight dramatically and
+ * speeds up both discovery and detail extraction. */
+async function blockHeavyResources(context) {
+  await context.route('**/*', (route) => {
+    const resourceType = route.request().resourceType()
+    if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+      route.abort()
+    } else {
+      route.continue()
+    }
+  })
+}
+
+/** Tiny concurrency-limited map — runs `worker` over `items` with at most
+ * `limit` in flight at once, in-order results. Avoids pulling in a
+ * dependency for something this small. */
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length)
+  let nextIndex = 0
+  async function run() {
+    while (nextIndex < items.length) {
+      const i = nextIndex
+      nextIndex += 1
+      results[i] = await worker(items[i], i)
+    }
+  }
+  const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, run)
+  await Promise.all(runners)
+  return results
+}
 
 class RateLimitedError extends Error {
   constructor() {
@@ -150,7 +185,10 @@ async function collectListingUrls(page, desired, onProgress) {
     }
 
     previousCount = currentCount
-    await sleep(jitter(1000, 500))
+    // With images/fonts/media blocked, the feed re-renders much faster
+    // than a full-weight page, so a shorter wait keeps the scroll loop
+    // safe from bot-detection while cutting a lot of idle time.
+    await sleep(jitter(500, 300))
   }
 
   return page.evaluate(() => {
@@ -300,7 +338,7 @@ async function runDetailPool(context, listings, concurrency, onProgress) {
         total: listings.length,
         retries
       })
-      await sleep(jitter(150, 250))
+      await sleep(jitter(80, 120))
     }
   }
 
@@ -318,9 +356,16 @@ async function discoverListings(context, subQueries, desired, onProgress) {
   const listings = []
   const seenHrefs = new Set()
   const isExpanded = subQueries.length > 1
+  let rateLimited = false
+  let launched = 0
 
-  for (let i = 0; i < subQueries.length && listings.length < desired; i += 1) {
-    const subQuery = subQueries[i]
+  async function runSubQuery(subQuery, i) {
+    // Once we already have enough (from sub-queries that finished sooner)
+    // or we've hit a rate limit, skip starting any more new tabs. Tabs
+    // already in flight are still allowed to finish.
+    if (listings.length >= desired || rateLimited) return
+
+    launched += 1
     const listPage = await context.newPage()
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(subQuery)}?hl=en`
 
@@ -338,29 +383,38 @@ async function discoverListings(context, subQueries, desired, onProgress) {
         await listPage.close()
         // If we already have some results from earlier sub-queries, keep
         // them rather than failing the whole search over one rate limit.
-        if (listings.length > 0) break
+        if (listings.length > 0 || launched > 1) {
+          rateLimited = true
+          return
+        }
         throw new RateLimitedError()
       }
 
       await dismissConsentIfPresent(listPage)
-      await listPage.waitForTimeout(2500)
+      await listPage.waitForTimeout(1500)
 
-      const remaining = desired - listings.length
+      const remaining = Math.max(1, desired - listings.length)
       const found = await collectListingUrls(listPage, remaining, onProgress)
       for (const item of found) {
         if (seenHrefs.has(item.href)) continue
         seenHrefs.add(item.href)
         listings.push(item)
-        if (listings.length >= desired) break
       }
     } catch (error) {
       if (error instanceof RateLimitedError) throw error
       // One sub-query failing (nav error/timeout) shouldn't kill the
-      // whole search — move on to the next category.
+      // whole search — the others still run.
     } finally {
       await listPage.close().catch(() => {})
     }
   }
+
+  // Run sub-queries with a small concurrency window instead of strictly
+  // one-at-a-time. Category expansion (e.g. "restaurants in X",
+  // "hotels in X", ...) are independent searches, so this is the biggest
+  // lever for multi-category discovery speed.
+  const concurrency = isExpanded ? DISCOVERY_CONCURRENCY : 1
+  await mapWithConcurrency(subQueries, concurrency, runSubQuery)
 
   return { listings, isExpanded }
 }
@@ -406,6 +460,8 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
   })
+
+  await blockHeavyResources(context)
 
   try {
     const { listings, isExpanded } = await discoverListings(
