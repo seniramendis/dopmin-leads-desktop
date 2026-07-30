@@ -1,5 +1,5 @@
 <script>
-  export let variant = 'info' // 'info' | 'error'
+  export let variant = 'info' // 'info' | 'error' | 'warning'
 </script>
 
 <div class="banner banner-{variant}">
@@ -23,5 +23,11 @@
     background: var(--red-soft);
     color: var(--red-dark);
     border: 1px solid var(--red-soft);
+  }
+
+  .banner-warning {
+    background: var(--yellow-soft);
+    color: var(--yellow-dark);
+    border: 1px solid var(--yellow-soft);
   }
 </style>

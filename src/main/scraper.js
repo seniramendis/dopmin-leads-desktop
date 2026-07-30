@@ -23,9 +23,12 @@ import {
   DETAIL_CONCURRENCY,
   DISCOVERY_CONCURRENCY,
   MAX_DETAIL_RETRIES,
-  NAV_TIMEOUT_MS
+  NAV_TIMEOUT_MS,
+  SLOW_NAV_THRESHOLD_MS,
+  MAX_CONSECUTIVE_NETWORK_FAILURES
 } from './constants'
 import { expandQuery } from './queryExpansion'
+import { checkInternetConnection, NetworkHealth, ConnectionLostError } from './network'
 
 /** Blocks images/fonts/media/stylesheets on every request this context
  * makes. None of the data we read (aria-labels, data-item-id attributes,
@@ -266,17 +269,23 @@ function detailParseScript() {
   return { name, phone, hasWebsite, website, address, category, openStatus }
 }
 
-async function extractDetail(context, listing, onRetryUsed) {
+async function extractDetail(context, listing, onRetryUsed, networkHealth) {
   let attempt = 0
   let lastError = ''
 
   while (attempt <= MAX_DETAIL_RETRIES) {
+    if (networkHealth?.aborted) {
+      return { success: false, href: listing.href, quickName: listing.quickName, error: 'Connection lost' }
+    }
+
     const page = await context.newPage()
     try {
+      const navStart = Date.now()
       await page.goto(withLocale(listing.href), {
         waitUntil: 'domcontentloaded',
         timeout: NAV_TIMEOUT_MS
       })
+      networkHealth?.recordSuccess(Date.now() - navStart)
 
       if (await isBlockedPage(page)) {
         throw new Error('Rate limited by Google Maps')
@@ -307,8 +316,10 @@ async function extractDetail(context, listing, onRetryUsed) {
     } catch (error) {
       lastError = error.message
       await page.close().catch(() => {})
+      networkHealth?.recordFailure(error.message)
       attempt += 1
       onRetryUsed?.()
+      if (networkHealth?.aborted) break
       if (attempt <= MAX_DETAIL_RETRIES) {
         await sleep(jitter(700, 600))
       }
@@ -318,7 +329,7 @@ async function extractDetail(context, listing, onRetryUsed) {
   return { success: false, href: listing.href, quickName: listing.quickName, error: lastError }
 }
 
-async function runDetailPool(context, listings, concurrency, onProgress) {
+async function runDetailPool(context, listings, concurrency, onProgress, networkHealth) {
   const results = new Array(listings.length)
   let nextIndex = 0
   let completed = 0
@@ -326,11 +337,17 @@ async function runDetailPool(context, listings, concurrency, onProgress) {
 
   async function worker() {
     while (nextIndex < listings.length) {
+      if (networkHealth?.aborted) return
       const i = nextIndex
       nextIndex += 1
-      results[i] = await extractDetail(context, listings[i], () => {
-        retries += 1
-      })
+      results[i] = await extractDetail(
+        context,
+        listings[i],
+        () => {
+          retries += 1
+        },
+        networkHealth
+      )
       completed += 1
       onProgress?.({
         phase: 'extracting',
@@ -352,7 +369,7 @@ async function runDetailPool(context, listings, concurrency, onProgress) {
  * href as it goes, and stops as soon as `desired` unique listings are
  * found (or every sub-query has been tried).
  */
-async function discoverListings(context, subQueries, desired, onProgress) {
+async function discoverListings(context, subQueries, desired, onProgress, networkHealth) {
   const listings = []
   const seenHrefs = new Set()
   const isExpanded = subQueries.length > 1
@@ -360,10 +377,11 @@ async function discoverListings(context, subQueries, desired, onProgress) {
   let launched = 0
 
   async function runSubQuery(subQuery, i) {
-    // Once we already have enough (from sub-queries that finished sooner)
-    // or we've hit a rate limit, skip starting any more new tabs. Tabs
-    // already in flight are still allowed to finish.
-    if (listings.length >= desired || rateLimited) return
+    // Once we already have enough (from sub-queries that finished sooner),
+    // we've hit a rate limit, or the connection has been declared dead,
+    // skip starting any more new tabs. Tabs already in flight are still
+    // allowed to finish.
+    if (listings.length >= desired || rateLimited || networkHealth?.aborted) return
 
     launched += 1
     const listPage = await context.newPage()
@@ -377,7 +395,9 @@ async function discoverListings(context, subQueries, desired, onProgress) {
     })
 
     try {
+      const navStart = Date.now()
       await listPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      networkHealth?.recordSuccess(Date.now() - navStart)
 
       if (await isBlockedPage(listPage)) {
         await listPage.close()
@@ -402,8 +422,10 @@ async function discoverListings(context, subQueries, desired, onProgress) {
       }
     } catch (error) {
       if (error instanceof RateLimitedError) throw error
+      networkHealth?.recordFailure(error.message)
       // One sub-query failing (nav error/timeout) shouldn't kill the
-      // whole search — the others still run.
+      // whole search — the others still run, unless the connection has
+      // now been declared dead, in which case no more get launched above.
     } finally {
       await listPage.close().catch(() => {})
     }
@@ -453,6 +475,27 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
   const desired = Math.max(1, Math.min(500, Number(maxResults) || 20))
   const subQueries = expandQuery(query)
 
+  // Fail fast if there's no connection at all, instead of spending 30-60s
+  // watching every navigation time out one by one.
+  onProgress?.({ phase: 'searching', message: 'Checking your internet connection…' })
+  const online = await checkInternetConnection()
+  if (!online) {
+    return {
+      success: false,
+      error: 'No internet connection detected. Please check your connection and try again.',
+      errorType: 'offline'
+    }
+  }
+
+  // Tracks connection quality for the whole run — flips `aborted` once too
+  // many navigations in a row fail with a network-level error, at which
+  // point every loop below stops launching new work.
+  const networkHealth = new NetworkHealth({
+    onProgress,
+    slowThresholdMs: SLOW_NAV_THRESHOLD_MS,
+    maxConsecutiveFailures: MAX_CONSECUTIVE_NETWORK_FAILURES
+  })
+
   const browser = await chromium.launch({ headless: true })
   const context = await browser.newContext({
     locale: 'en-US',
@@ -468,8 +511,11 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
       context,
       subQueries,
       desired,
-      onProgress
+      onProgress,
+      networkHealth
     )
+
+    if (networkHealth.aborted) throw new ConnectionLostError()
 
     if (listings.length === 0) {
       return {
@@ -491,11 +537,17 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
       context,
       targetListings,
       DETAIL_CONCURRENCY,
-      onProgress
+      onProgress,
+      networkHealth
     )
 
-    const succeeded = detailResults.filter((r) => r.success)
-    const failedCount = detailResults.length - succeeded.length
+    if (networkHealth.aborted) throw new ConnectionLostError()
+
+    // Workers stop early (leaving `undefined` holes) once the connection
+    // is declared dead — filter those out before counting successes.
+    const attempted = detailResults.filter(Boolean)
+    const succeeded = attempted.filter((r) => r.success)
+    const failedCount = attempted.length - succeeded.length
     const leads = succeeded.map(toLead)
 
     onProgress?.({ phase: 'done', total: leads.length })
@@ -511,7 +563,8 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
       queriesUsed: subQueries
     }
   } catch (error) {
-    return { success: false, error: error.message }
+    const errorType = error instanceof ConnectionLostError ? 'offline' : undefined
+    return { success: false, error: error.message, errorType }
   } finally {
     await browser.close()
   }

@@ -17,6 +17,7 @@
   let leads = []
   let isScraping = false
   let errorMessage = ''
+  let connectionWarning = ''
   let totalFound = 0
   let requested = 0
   let truncated = false
@@ -48,6 +49,19 @@
   }
 
   function handleProgress(payload) {
+    if (payload.phase === 'connection-slow') {
+      // A slow-connection notice, not a phase change — leave the current
+      // phase/progress UI alone and just surface the warning alongside it.
+      connectionWarning = payload.message || 'Your internet connection looks slow.'
+      return
+    }
+    if (payload.phase === 'connection-lost') {
+      // The scrape is aborting; the final error banner (from the rejected
+      // response below) will explain it, so just clear the transient warning.
+      connectionWarning = ''
+      return
+    }
+
     progressPhase = payload.phase
     if (payload.phase === 'searching') {
       progressMessage = payload.message || 'Opening Google Maps…'
@@ -64,6 +78,7 @@
 
     isScraping = true
     errorMessage = ''
+    connectionWarning = ''
     leads = []
     hasSearched = true
     resetProgress()
@@ -92,6 +107,7 @@
       errorMessage = err.message || 'Scraping failed.'
     } finally {
       isScraping = false
+      connectionWarning = ''
       resetProgress()
     }
   }
@@ -126,6 +142,9 @@
         {extractDone}
         {extractTotal}
       />
+      {#if connectionWarning}
+        <Banner variant="warning">{connectionWarning}</Banner>
+      {/if}
     {/if}
 
     {#if hasSearched && !isScraping && wasExpanded && leads.length > 0}

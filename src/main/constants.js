@@ -30,6 +30,17 @@ export const MAX_DETAIL_RETRIES = 2
 
 export const NAV_TIMEOUT_MS = 30000
 
+// A single navigation taking longer than this is still allowed to succeed,
+// but it's a strong sign of a slow/unstable connection, so we surface a
+// one-time warning to the user instead of just quietly running long.
+export const SLOW_NAV_THRESHOLD_MS = 12000
+
+// How many navigations in a row have to fail with a *network-level* error
+// (dropped wifi, DNS failure, connection reset, etc — see network.js)
+// before we give up on the whole search rather than keep retrying into a
+// dead connection.
+export const MAX_CONSECUTIVE_NETWORK_FAILURES = 4
+
 // Words that signal the user already told us what KIND of business they
 // want (e.g. "restaurants in Kandy", "hardware stores near Galle"). If a
 // query contains none of these, it's almost certainly just a place name
