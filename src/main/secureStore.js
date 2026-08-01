@@ -22,10 +22,22 @@ const store = new StoreClass({
   encryptionKey: 'dopmin-scraper-local-fallback'
 })
 
-const API_KEY_FIELD = 'apiKey'
+// Field names per provider. "gemini" deliberately keeps the original
+// 'apiKey' field name so a key someone already saved via the existing
+// Settings UI keeps working unchanged after this file adds a second
+// provider.
+const FIELD_BY_PROVIDER = {
+  gemini: 'apiKey',
+  openrouter: 'apiKey_openrouter'
+}
 
-export function getApiKey() {
-  const stored = store.get(API_KEY_FIELD, '')
+function fieldFor(provider) {
+  return FIELD_BY_PROVIDER[provider] || FIELD_BY_PROVIDER.gemini
+}
+
+export function getApiKey(provider = 'gemini') {
+  const field = fieldFor(provider)
+  const stored = store.get(field, '')
   if (!stored) return ''
 
   if (safeStorage.isEncryptionAvailable()) {
@@ -42,16 +54,17 @@ export function getApiKey() {
   return stored
 }
 
-export function setApiKey(key) {
+export function setApiKey(key, provider = 'gemini') {
+  const field = fieldFor(provider)
   if (!key) {
-    store.delete(API_KEY_FIELD)
+    store.delete(field)
     return
   }
 
   if (safeStorage.isEncryptionAvailable()) {
     const encrypted = safeStorage.encryptString(key)
-    store.set(API_KEY_FIELD, encrypted.toString('base64'))
+    store.set(field, encrypted.toString('base64'))
   } else {
-    store.set(API_KEY_FIELD, key)
+    store.set(field, key)
   }
 }

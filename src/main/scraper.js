@@ -29,6 +29,18 @@ import {
 } from './constants'
 import { expandQuery } from './queryExpansion'
 import { checkInternetConnection, NetworkHealth, ConnectionLostError } from './network'
+import { scrapeBusinessProfile } from './businessProfiler'
+
+// Single-business entry point (Phase 1.1): unlike scrapeLeads() below,
+// which discovers many businesses from a Google Maps search, this profiles
+// one business's own website directly — pricing/services, contact/social,
+// tech stack, and an optional 1-2 competitor comparison. The heavy lifting
+// lives in businessProfiler.js to keep the Maps-discovery pipeline below
+// and the single-site deep-extraction pipeline independently readable;
+// this is just the export the rest of the app (index.js) calls.
+export async function scrapeSingleBusiness(url, options, onProgress) {
+  return scrapeBusinessProfile(url, options, onProgress)
+}
 
 /** Blocks images/fonts/media/stylesheets on every request this context
  * makes. None of the data we read (aria-labels, data-item-id attributes,

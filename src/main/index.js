@@ -2,8 +2,10 @@ import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { scrapeLeads } from './scraper'
+import { scrapeLeads, scrapeSingleBusiness } from './scraper'
 import { runZeroCostAudit } from './auditEngine'
+import { analyzeBusinessProfile } from './analystEngine'
+import { getApiKey, setApiKey } from './secureStore'
 import { upsertLeads, listLeads, countLeads, getLeadHistory, setLeadStatus, getDbStats } from './db'
 
 function createWindow() {
@@ -145,6 +147,74 @@ function registerIpcHandlers() {
     } catch (error) {
       return { success: false, error: error.message }
     }
+  })
+
+  // Single-Business Profiler — deep extraction on one business's own
+  // website (pricing/services pages, contact info + social links, tech
+  // stack, plus an optional 1-2 competitor comparison), all folded together
+  // with the existing $0 audit into one JSON object. See
+  // src/main/businessProfiler.js.
+  ipcMain.handle('profile-business', async (event, payload = {}) => {
+    const url = typeof payload === 'string' ? payload : payload.url || ''
+    const competitorUrls = typeof payload === 'string' ? [] : payload.competitorUrls || []
+
+    if (!url.trim()) {
+      return { success: false, error: 'Please enter a business website URL.' }
+    }
+
+    const onProgress = (progressPayload) => {
+      try {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('profile-progress', progressPayload)
+        }
+      } catch {
+        // Window may have closed mid-profile — safe to ignore.
+      }
+    }
+
+    return scrapeSingleBusiness(url, { competitorUrls }, onProgress)
+  })
+
+  // API key storage (Settings modal already called these — they were never
+  // wired up on the main-process side). Provider defaults to 'gemini' for
+  // backward compatibility with the single-key UI that existed before the
+  // OpenRouter fallback (2.5) needed a second key.
+  ipcMain.handle('get-api-key', (_event, provider) => getApiKey(provider || 'gemini'))
+  ipcMain.handle('set-api-key', (_event, { key, provider } = {}) =>
+    setApiKey(key, provider || 'gemini')
+  )
+
+  // SettingsModal's "Google AI Studio" link already called this — also
+  // never wired up.
+  ipcMain.handle('open-external-link', (_event, url) => {
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      shell.openExternal(url)
+    }
+  })
+
+  // LLM Analyst Engine — turns one business's scraped/audited data into a
+  // digital-maturity score, KPIs, SWOT, prioritized vulnerabilities (each
+  // mapped to a real Dopmin service), and an outreach angle. Reads both
+  // provider keys itself so the renderer doesn't have to pass secrets
+  // around. See src/main/analystEngine.js.
+  ipcMain.handle('analyze-business', async (event, payload = {}) => {
+    const { scrapedData, forceRefresh } = payload
+    const keys = {
+      geminiApiKey: getApiKey('gemini'),
+      openRouterApiKey: getApiKey('openrouter')
+    }
+
+    const onProgress = (progressPayload) => {
+      try {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('analyze-progress', progressPayload)
+        }
+      } catch {
+        // Window may have closed mid-analysis — safe to ignore.
+      }
+    }
+
+    return analyzeBusinessProfile(scrapedData, keys, onProgress, Boolean(forceRefresh))
   })
 
   // WhatsApp Direct Outreach Bridge — opens the system default handler

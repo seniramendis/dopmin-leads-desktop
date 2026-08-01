@@ -26,13 +26,13 @@ import {
   ANALYTICS_SIGNATURES
 } from './constants'
 
-function normalizeUrl(url) {
+export function normalizeUrl(url) {
   const trimmed = (url || '').trim()
   if (!trimmed) return ''
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
 }
 
-function hostnameOf(url) {
+export function hostnameOf(url) {
   try {
     return new URL(url).hostname
   } catch {
@@ -71,7 +71,7 @@ function rawGet(targetUrl, timeoutMs = AUDIT_HTTP_TIMEOUT_MS) {
 /** DNS resolution is the cheapest possible "is this domain even alive?"
  * check — no HTTP round trip needed, so it's used both for the target site
  * and for any agency-credit domain we find in the footer. */
-async function domainIsAlive(hostname) {
+export async function domainIsAlive(hostname) {
   if (!hostname) return false
   try {
     await dns.resolve(hostname)
@@ -85,7 +85,7 @@ async function domainIsAlive(hostname) {
  * page text or footer links, then checks whether the credited agency's own
  * domain still resolves. A dead agency domain is the single strongest
  * "sitting duck" signal for a maintenance-takeover pitch. */
-async function detectAbandonedAgency(pageText, footerLinks, siteHostname) {
+export async function detectAbandonedAgency(pageText, footerLinks, siteHostname) {
   let agencyName = ''
   for (const pattern of AGENCY_FOOTER_PATTERNS) {
     const match = pageText.match(pattern)

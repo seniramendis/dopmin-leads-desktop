@@ -38,6 +38,16 @@
         </button>
       </li>
       <li>
+        <button
+          class="nav-item nav-button"
+          class:active={view === 'profiler'}
+          on:click={() => onNavigate('profiler')}
+        >
+          <span class="nav-dot"></span>
+          AI Profiler
+        </button>
+      </li>
+      <li>
         <span class="nav-item disabled">
           Reports
           <span class="nav-soon">Soon</span>

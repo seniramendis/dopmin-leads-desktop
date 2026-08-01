@@ -120,6 +120,12 @@ export function initDb() {
       CREATE VIRTUAL TABLE IF NOT EXISTS leads_fts USING fts5(
         id UNINDEXED, name, category, address, content=''
       );
+
+      CREATE TABLE IF NOT EXISTS analysis_cache (
+        cache_key TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `)
 
     return db
@@ -127,7 +133,7 @@ export function initDb() {
 
   // JSON fallback
   const jsonPath = path.join(app.getPath('userData'), 'dopmin-leads.json')
-  let data = { leads: {}, lead_history: [], next_history_id: 1 }
+  let data = { leads: {}, lead_history: [], next_history_id: 1, analysis_cache: {} }
   try {
     if (fs.existsSync(jsonPath)) {
       data = JSON.parse(fs.readFileSync(jsonPath, 'utf8') || '{}')
@@ -487,6 +493,51 @@ export function setLeadStatus(leadId, status) {
     return
   }
   db.prepare(`UPDATE leads SET status = ? WHERE id = ?`).run(status, leadId)
+}
+
+/**
+ * Local cache for LLM analysis results (analystEngine.js), keyed by a
+ * normalized business URL — avoids re-calling Gemini/OpenRouter for a URL
+ * that's already been analyzed. Callers are responsible for their own TTL
+ * policy; this just persists/retrieves whatever payload + cachedAt they
+ * ask for, same JSON-blob approach as the rest of this file's fallback mode.
+ */
+export function getCachedAnalysis(cacheKey) {
+  initDb()
+  if (db.isFallback) {
+    const row = (db.data.analysis_cache || {})[cacheKey]
+    if (!row) return null
+    try {
+      return { ...JSON.parse(row.payload), cachedAt: row.created_at }
+    } catch {
+      return null
+    }
+  }
+  const row = db.prepare('SELECT payload, created_at FROM analysis_cache WHERE cache_key = ?').get(cacheKey)
+  if (!row) return null
+  try {
+    return { ...JSON.parse(row.payload), cachedAt: row.created_at }
+  } catch {
+    return null
+  }
+}
+
+export function setCachedAnalysis(cacheKey, value) {
+  initDb()
+  const now = new Date().toISOString()
+  const payload = JSON.stringify(value)
+
+  if (db.isFallback) {
+    db.data.analysis_cache = db.data.analysis_cache || {}
+    db.data.analysis_cache[cacheKey] = { payload, created_at: now }
+    db.save()
+    return
+  }
+
+  db.prepare(
+    `INSERT INTO analysis_cache (cache_key, payload, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at`
+  ).run(cacheKey, payload, now)
 }
 
 export function getDbStats() {

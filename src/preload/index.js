@@ -24,6 +24,21 @@ const api = {
    * lead's website. @param {string} url */
   auditWebsite: (url) => ipcRenderer.invoke('audit-website', url),
 
+  /** Deep-profiles a single business's own website: pricing/services pages,
+   * contact info + social links, tech stack, plus an optional 1-2
+   * competitor comparison — all folded together with the $0 audit.
+   * @param {{ url: string, competitorUrls?: string[] }} payload */
+  profileBusiness: (payload) => ipcRenderer.invoke('profile-business', payload),
+
+  /** Subscribe to live progress while a single-business profile is running.
+   * @param {(payload: object) => void} callback
+   * @returns {() => void} unsubscribe function — call on component teardown */
+  onProfileProgress: (callback) => {
+    const handler = (_event, payload) => callback(payload)
+    ipcRenderer.on('profile-progress', handler)
+    return () => ipcRenderer.removeListener('profile-progress', handler)
+  },
+
   /** Opens a WhatsApp click-to-chat link pre-filled with a message.
    * @param {{ phone: string, message?: string }} payload */
   openWhatsapp: (payload) => ipcRenderer.invoke('open-whatsapp', payload),
@@ -41,6 +56,30 @@ const api = {
 
   /** @param {{ leadId: string, status: string }} payload */
   dbSetStatus: (payload) => ipcRenderer.invoke('db-set-status', payload),
+
+  /** Reads a stored API key. @param {'gemini'|'openrouter'} [provider] */
+  getApiKey: (provider) => ipcRenderer.invoke('get-api-key', provider),
+
+  /** Saves an API key. @param {string} key @param {'gemini'|'openrouter'} [provider] */
+  setApiKey: (key, provider) => ipcRenderer.invoke('set-api-key', { key, provider }),
+
+  /** Opens a URL in the system's default browser. @param {string} url */
+  openExternalLink: (url) => ipcRenderer.invoke('open-external-link', url),
+
+  /** Runs the LLM Analyst Engine on one business's scraped data — digital
+   * maturity score, KPIs, SWOT, vulnerabilities (each mapped to a Dopmin
+   * service), and an outreach angle. Cached locally per URL.
+   * @param {{ scrapedData: object, forceRefresh?: boolean }} payload */
+  analyzeBusiness: (payload) => ipcRenderer.invoke('analyze-business', payload),
+
+  /** Subscribe to live progress while an analysis is running.
+   * @param {(payload: object) => void} callback
+   * @returns {() => void} unsubscribe function — call on component teardown */
+  onAnalyzeProgress: (callback) => {
+    const handler = (_event, payload) => callback(payload)
+    ipcRenderer.on('analyze-progress', handler)
+    return () => ipcRenderer.removeListener('analyze-progress', handler)
+  },
 
   dbStats: () => ipcRenderer.invoke('db-stats')
 }

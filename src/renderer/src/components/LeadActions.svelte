@@ -1,9 +1,13 @@
 <script>
+  import DeepProfilePanel from './DeepProfilePanel.svelte'
+  import { settingsOpen } from '../lib/stores'
+
   export let lead
 
   let audit = null // last audit result for this lead, if run
   let auditLoading = false
   let auditError = ''
+  let showProfileModal = false
 
   const defaultMessage = () =>
     lead.hasWebsite
@@ -57,6 +61,14 @@
           {audit.score}/100
         </span>
       {/if}
+
+      <button
+        class="chip chip-ai"
+        on:click={() => (showProfileModal = true)}
+        title="Deep profile + AI Analyst: pricing, tech stack, SWOT, outreach angle"
+      >
+        Deep profile & AI analysis
+      </button>
     {/if}
 
     <button
@@ -81,6 +93,33 @@
     </ul>
   {/if}
 </div>
+
+{#if showProfileModal}
+  <div class="overlay" role="presentation" on:click={() => (showProfileModal = false)}>
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      on:click|stopPropagation
+      on:keydown|stopPropagation
+    >
+      <div class="modal-header">
+        <h2>{lead.name}</h2>
+        <button class="close-btn" on:click={() => (showProfileModal = false)} aria-label="Close"
+          >✕</button
+        >
+      </div>
+      <DeepProfilePanel
+        url={lead.website}
+        leadName={lead.name}
+        showUrlInput={false}
+        autoRun={true}
+        onOpenSettings={() => settingsOpen.set(true)}
+      />
+    </div>
+  </div>
+{/if}
 
 <style>
   .actions {
@@ -125,6 +164,12 @@
     color: #16803d;
   }
 
+  .chip-ai {
+    background: #eef1ff;
+    border-color: #c9cffc;
+    color: #4338ca;
+  }
+
   .score-badge {
     font-size: 0.72rem;
     font-weight: 700;
@@ -163,5 +208,48 @@
 
   .issue-list li {
     margin-bottom: 2px;
+  }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 18, 22, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 60;
+    padding: 24px;
+  }
+
+  .modal {
+    background: var(--surface);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    padding: 22px 24px;
+    width: 640px;
+    max-width: 100%;
+    max-height: 85vh;
+    overflow-y: auto;
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+
+  .modal-header h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    color: var(--text-1);
+  }
+
+  .close-btn {
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-3);
   }
 </style>

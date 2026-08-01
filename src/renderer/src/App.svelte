@@ -10,7 +10,10 @@
   import LeadsPanel from './components/LeadsPanel.svelte'
   import ResultsTable from './components/ResultsTable.svelte'
   import LeadDatabase from './components/LeadDatabase.svelte'
+  import SettingsModal from './components/SettingsModal.svelte'
+  import DeepProfilePanel from './components/DeepProfilePanel.svelte'
   import Footer from './components/Footer.svelte'
+  import { settingsOpen } from './lib/stores'
 
   let showSplash = true
   let view = 'search'
@@ -125,13 +128,27 @@
     <SplashScreen on:done={() => (showSplash = false)} />
   {/if}
 
+  {#if $settingsOpen}
+    <SettingsModal onClose={() => settingsOpen.set(false)} />
+  {/if}
+
   <Sidebar {view} onNavigate={(v) => (view = v)} />
 
   <div class="content">
-    <AppHeader />
+    <AppHeader onOpenSettings={() => settingsOpen.set(true)} />
 
     {#if view === 'database'}
       <LeadDatabase />
+    {:else if view === 'profiler'}
+      <section class="card profiler-card">
+        <h2>AI Business Profiler</h2>
+        <p class="profiler-hint">
+          Deep-profile any business's website — pricing/services pages, contact + social links, tech
+          stack, and an optional competitor comparison — then run the AI Analyst for a digital
+          maturity score, SWOT, and a ready-to-use outreach angle.
+        </p>
+        <DeepProfilePanel showUrlInput={true} onOpenSettings={() => settingsOpen.set(true)} />
+      </section>
     {:else}
       <SearchPanel bind:query bind:desiredCount {isScraping} onSearch={handleSearch} />
 
@@ -228,6 +245,27 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
+  }
+
+  .profiler-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 20px 22px;
+  }
+
+  .profiler-card h2 {
+    margin: 0 0 6px;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-1);
+  }
+
+  .profiler-hint {
+    margin: 0 0 16px;
+    font-size: 0.84rem;
+    color: var(--text-3);
+    max-width: 640px;
   }
 
   @media (max-width: 1000px) {
