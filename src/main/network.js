@@ -87,7 +87,33 @@ export class NetworkHealth {
 
 export class ConnectionLostError extends Error {
   constructor() {
-    super('Your internet connection dropped mid-search. Please check your connection and try again.')
+    super(
+      'Your internet connection dropped mid-search. Please check your connection and try again.'
+    )
     this.name = 'ConnectionLostError'
   }
+}
+
+/**
+ * Forwards AI Deep Profile requests to our secure Cloudflare proxy.
+ * The proxy handles injecting the real API key so it is never exposed in the desktop client.
+ */
+export async function analyzeDomainWithProxy(domainUrl) {
+  const proxyUrl = 'https://dopmin-proxy.dopmin-technologies.workers.dev'
+
+  const response = await fetch(proxyUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-app-secret': 'dopmin_super_secret_app_token_2026'
+    },
+    body: JSON.stringify({ domainUrl })
+  })
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`Proxy error: ${response.status} ${body ? '- ' + body : ''}`)
+  }
+
+  return await response.json()
 }

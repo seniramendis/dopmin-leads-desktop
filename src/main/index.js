@@ -5,6 +5,7 @@ import icon from '../../resources/icon.png?asset'
 import { scrapeLeads, scrapeSingleBusiness } from './scraper'
 import { runZeroCostAudit } from './auditEngine'
 import { analyzeBusinessProfile } from './analystEngine'
+import { analyzeDomainWithProxy } from './network'
 import { getApiKey, setApiKey } from './secureStore'
 import { upsertLeads, listLeads, countLeads, getLeadHistory, setLeadStatus, getDbStats } from './db'
 
@@ -215,6 +216,18 @@ function registerIpcHandlers() {
     }
 
     return analyzeBusinessProfile(scrapedData, keys, onProgress, Boolean(forceRefresh))
+  })
+
+  ipcMain.handle('run-deep-profile', async (_event, domainUrl) => {
+    if (!domainUrl || typeof domainUrl !== 'string' || !domainUrl.trim()) {
+      return { error: 'Please provide a valid domain URL.' }
+    }
+
+    try {
+      return await analyzeDomainWithProxy(domainUrl.trim())
+    } catch (error) {
+      return { error: error?.message || String(error) }
+    }
   })
 
   // WhatsApp Direct Outreach Bridge — opens the system default handler

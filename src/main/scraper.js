@@ -59,7 +59,8 @@ async function blockHeavyResources(context) {
 }
 
 /** Tiny concurrency-limited map — runs `worker` over `items` with at most
- * `limit` in flight at once, in-order results. Avoids pulling in a
+ 
+* `limit` in flight at once, in-order results. Avoids pulling in a
  * dependency for something this small. */
 async function mapWithConcurrency(items, limit, worker) {
   const results = new Array(items.length)
@@ -287,7 +288,12 @@ async function extractDetail(context, listing, onRetryUsed, networkHealth) {
 
   while (attempt <= MAX_DETAIL_RETRIES) {
     if (networkHealth?.aborted) {
-      return { success: false, href: listing.href, quickName: listing.quickName, error: 'Connection lost' }
+      return {
+        success: false,
+        href: listing.href,
+        quickName: listing.quickName,
+        error: 'Connection lost'
+      }
     }
 
     const page = await context.newPage()

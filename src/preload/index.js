@@ -30,6 +30,8 @@ const api = {
    * @param {{ url: string, competitorUrls?: string[] }} payload */
   profileBusiness: (payload) => ipcRenderer.invoke('profile-business', payload),
 
+  runDeepProfile: (domainUrl) => ipcRenderer.invoke('run-deep-profile', domainUrl),
+
   /** Subscribe to live progress while a single-business profile is running.
    * @param {(payload: object) => void} callback
    * @returns {() => void} unsubscribe function — call on component teardown */

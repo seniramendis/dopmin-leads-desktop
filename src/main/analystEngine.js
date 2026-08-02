@@ -165,7 +165,8 @@ async function callGemini(prompt, apiKey) {
 
   let GoogleGenerativeAI
   try {
-    const mod = await import('@google/generative-ai')
+    const dynamicImport = new Function('modulePath', 'return import(modulePath)')
+    const mod = await dynamicImport('@google/generative-ai')
     GoogleGenerativeAI = mod.GoogleGenerativeAI || mod.default
   } catch (loadErr) {
     const err = new Error('Gemini SDK (@google/generative-ai) not installed or failed to load.')
