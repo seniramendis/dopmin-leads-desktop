@@ -1,5 +1,5 @@
 <script>
-  import logo from '../assets/logo_transparent_icon.png'
+  import logo from '../assets/dopmin-logo.png'
 
   export let view = 'search'
   export let onNavigate = () => {}
@@ -120,22 +120,23 @@
   }
 
   .brand-mark {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
-    background: var(--brand-grad);
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    background: #fff;
     box-shadow: var(--shadow-sm);
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    padding: 4px;
+    border: 1px solid var(--border-soft);
   }
 
   .brand-mark img {
-    width: 22px;
-    height: 22px;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
-    filter: brightness(0) invert(1);
   }
 
   .brand-name {
