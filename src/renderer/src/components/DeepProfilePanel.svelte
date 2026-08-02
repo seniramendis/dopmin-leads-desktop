@@ -38,9 +38,7 @@
   let unsubAnalyze
 
   $: tabsToShow =
-    usedFallback && parsedExtraSections.length
-      ? [...TABS, { id: 'details', label: 'Full Report' }]
-      : TABS
+    usedFallback && parsedExtraSections.length ? [...TABS, { id: 'details', label: 'Full Report' }] : TABS
   $: busy = phase === 'profiling' || phase === 'analyzing'
   $: hasResult = Boolean(analysis || reportMarkdown)
   $: score = analysis ? clamp(analysis.digitalMaturityScore, 0, 100) : 0
@@ -292,7 +290,7 @@
   function parseReportMarkdown(md) {
     if (!md) return null
     const lines = md.split(/\r?\n/)
-    const topHeaderRe = /^\*\*\d+\.\s*(.+?)\*\*:?\s*$/ // e.g. **1. Digital Maturity Score: 4.5/10**
+    const topHeaderRe = /^\*\*(?:\d+\.\s*)?(.+?)\*\*:?\s*$/ // e.g. **1. Digital Maturity Score: 4.5/10** or bare **Strengths:**
     const mdHeaderRe = /^#{1,6}\s+(.+)$/
 
     const blocks = []
@@ -317,10 +315,23 @@
     let outreachAngle = ''
     const extraSections = []
     const bulletRe = /^[*-]\s+(.*)$/
+    const quadrantRe = /^(strengths?|weaknesses?|opportunit(?:y|ies)|threats?):?$/i
+    const quadrantKey = (word) => {
+      const w = word.toLowerCase()
+      return w.startsWith('strength')
+        ? 'strengths'
+        : w.startsWith('weak')
+          ? 'weaknesses'
+          : w.startsWith('opportun')
+            ? 'opportunities'
+            : 'threats'
+    }
 
     for (const block of blocks) {
       const t = block.title.toLowerCase()
       const scoreOnTitle = block.title.match(/(\d+(?:\.\d+)?)\s*\/\s*(\d+)/)
+      // strip a trailing "(...)" qualifier so "Strengths (Internal)" still counts as a bare quadrant
+      const bareTitle = block.title.replace(/\([^)]*\)/g, '').replace(/^swot[\s:-]*/i, '').trim()
 
       if (score === null && (t.includes('maturity score') || t.includes('digital maturity'))) {
         if (scoreOnTitle) {
@@ -335,19 +346,28 @@
         continue
       }
 
+      // A section titled exactly "Strengths" / "Weaknesses" / "Opportunities" / "Threats"
+      // (the AI often lists these as their own top-level sections rather than nesting
+      // them under one "SWOT" header) — every bullet in it belongs to that quadrant.
+      if (quadrantRe.test(bareTitle)) {
+        const bucket = quadrantKey(bareTitle)
+        for (const l of block.lines) {
+          const b = l.match(bulletRe)
+          if (b) swot[bucket].push(stripMd(b[1]))
+        }
+        if (!block.lines.some((l) => bulletRe.test(l))) {
+          const text = block.lines.map(stripMd).filter(Boolean).join(' ')
+          if (text) swot[bucket].push(text)
+        }
+        continue
+      }
+
       if (t.includes('swot')) {
         let bucket = null
         for (const l of block.lines) {
           const sub = l.match(/^\*\*(strengths?|weaknesses?|opportunit(?:y|ies)|threats?):?\*\*:?/i)
           if (sub) {
-            const key = sub[1].toLowerCase()
-            bucket = key.startsWith('strength')
-              ? 'strengths'
-              : key.startsWith('weak')
-                ? 'weaknesses'
-                : key.startsWith('opportun')
-                  ? 'opportunities'
-                  : 'threats'
+            bucket = quadrantKey(sub[1])
             continue
           }
           const b = l.match(bulletRe)
@@ -370,7 +390,7 @@
         t.includes('key gaps') ||
         t.includes('critical gaps') ||
         t.includes('quick win') ||
-        t.includes('opportunit') // "Opportunities for Dopmin" style sections, distinct from SWOT's own
+        t.includes('opportunit') // longer titles like "Opportunities for Dopmin" — bare "Opportunities" is caught above
       ) {
         for (const l of block.lines) {
           const b = l.match(bulletRe)
@@ -380,6 +400,14 @@
       }
 
       if (block.title) extraSections.push(block)
+    }
+
+    // If the report has no dedicated pitch/vulnerabilities section, the prospect's own
+    // SWOT weaknesses double as outreach openings so the tab isn't left empty.
+    if (!vulnerabilities.length && swot.weaknesses.length) {
+      for (const w of swot.weaknesses) {
+        vulnerabilities.push({ issue: w, impact: '', dopminService: '' })
+      }
     }
 
     const hasSwot = Object.values(swot).some((arr) => arr.length)
@@ -691,13 +719,7 @@
             <div class="kpi-grid">
               {#each analysis.kpis as kpi}
                 {@const v = kpiVisual(kpi.label)}
-                <KpiCard
-                  label={kpi.label}
-                  value={kpi.value}
-                  note={kpi.insight}
-                  icon={v.icon}
-                  accent={v.accent}
-                />
+                <KpiCard label={kpi.label} value={kpi.value} note={kpi.insight} icon={v.icon} accent={v.accent} />
               {/each}
             </div>
           </div>
