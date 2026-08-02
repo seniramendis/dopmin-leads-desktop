@@ -3,11 +3,20 @@
 
   export let view = 'search'
   export let onNavigate = () => {}
+
+  const NAV_ITEMS = [
+    { id: 'dashboard', label: 'Dashboard', icon: 'grid' },
+    { id: 'search', label: 'Lead Search', icon: 'search' },
+    { id: 'database', label: 'Leads Database', icon: 'stack' },
+    { id: 'profiler', label: 'AI Profiler', icon: 'spark' }
+  ]
 </script>
 
 <aside class="sidebar">
   <div class="sidebar-brand">
-    <img class="brand-mark" src={logo} alt="Dopmin" />
+    <div class="brand-mark">
+      <img src={logo} alt="Dopmin" />
+    </div>
     <div class="brand-text">
       <div class="brand-name">Dopmin</div>
       <div class="brand-product">Lead Extraction</div>
@@ -17,42 +26,62 @@
   <nav class="nav">
     <div class="nav-section-label">Workspace</div>
     <ul>
-      <li>
-        <button
-          class="nav-item nav-button"
-          class:active={view === 'search'}
-          on:click={() => onNavigate('search')}
-        >
-          <span class="nav-dot"></span>
-          Lead Search
-        </button>
-      </li>
-      <li>
-        <button
-          class="nav-item nav-button"
-          class:active={view === 'database'}
-          on:click={() => onNavigate('database')}
-        >
-          <span class="nav-dot"></span>
-          Leads Database
-        </button>
-      </li>
-      <li>
-        <button
-          class="nav-item nav-button"
-          class:active={view === 'profiler'}
-          on:click={() => onNavigate('profiler')}
-        >
-          <span class="nav-dot"></span>
-          AI Profiler
-        </button>
-      </li>
-      <li>
-        <span class="nav-item disabled">
-          Reports
-          <span class="nav-soon">Soon</span>
-        </span>
-      </li>
+      {#each NAV_ITEMS as item (item.id)}
+        <li>
+          <button
+            class="nav-item nav-button"
+            class:active={view === item.id}
+            on:click={() => onNavigate(item.id)}
+          >
+            <span class="nav-icon">
+              {#if item.icon === 'grid'}
+                <svg viewBox="0 0 24 24" fill="none"
+                  ><path
+                    d="M4 4h7v7H4V4Zm9 0h7v7h-7V4ZM4 13h7v7H4v-7Zm9 0h7v7h-7v-7Z"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                  /></svg
+                >
+              {:else if item.icon === 'search'}
+                <svg viewBox="0 0 24 24" fill="none"
+                  ><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8" /><path
+                    d="m20 20-4-4"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                  /></svg
+                >
+              {:else if item.icon === 'stack'}
+                <svg viewBox="0 0 24 24" fill="none"
+                  ><path
+                    d="m12 3 9 5-9 5-9-5 9-5Z"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                  /><path
+                    d="m3 12 9 5 9-5M3 16.5l9 5 9-5"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  /></svg
+                >
+              {:else}
+                <svg viewBox="0 0 24 24" fill="none"
+                  ><path
+                    d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                  /></svg
+                >
+              {/if}
+            </span>
+            {item.label}
+          </button>
+        </li>
+      {/each}
     </ul>
   </nav>
 
@@ -84,17 +113,29 @@
   .sidebar-brand {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 11px;
     padding: 4px 6px 20px;
     border-bottom: 1px solid var(--border-soft);
     margin-bottom: 16px;
   }
 
   .brand-mark {
-    width: 30px;
-    height: 30px;
-    object-fit: contain;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: var(--brand-grad);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
+  }
+
+  .brand-mark img {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+    filter: brightness(0) invert(1);
   }
 
   .brand-name {
@@ -131,27 +172,49 @@
   }
 
   .nav-item {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 9px;
-    padding: 9px 10px;
+    gap: 10px;
+    padding: 9px 10px 9px 13px;
     border-radius: var(--radius-sm);
     font-size: 0.86rem;
     font-weight: 600;
     color: var(--text-2);
   }
 
-  .nav-item.active {
-    background: var(--surface-soft);
-    color: var(--text-1);
+  .nav-icon {
+    display: flex;
+    width: 17px;
+    height: 17px;
+    flex-shrink: 0;
+    color: var(--text-3);
+    transition: color 0.15s var(--ease);
   }
 
-  .nav-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
+  .nav-icon svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .nav-item.active {
+    background: var(--brand-soft);
+    color: var(--brand-dark);
+  }
+
+  .nav-item.active .nav-icon {
+    color: var(--brand);
+  }
+
+  .nav-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 20%;
+    bottom: 20%;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
     background: var(--brand);
-    flex-shrink: 0;
   }
 
   .nav-button {
@@ -163,26 +226,9 @@
     font-family: inherit;
   }
 
-  .nav-button:hover {
+  .nav-button:hover:not(.active) {
     background: var(--surface-soft);
-  }
-
-  .nav-item.disabled {
-    color: var(--text-3);
-    cursor: default;
-    justify-content: space-between;
-  }
-
-  .nav-soon {
-    font-size: 0.64rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-3);
-    background: var(--surface-soft);
-    border: 1px solid var(--border);
-    padding: 2px 6px;
-    border-radius: 999px;
+    color: var(--text-1);
   }
 
   .sidebar-footer {
@@ -204,7 +250,7 @@
     width: 28px;
     height: 28px;
     border-radius: 8px;
-    background: var(--text-1);
+    background: var(--brand-grad);
     color: #fff;
     display: flex;
     align-items: center;
@@ -270,6 +316,16 @@
 
     .nav-item {
       white-space: nowrap;
+    }
+
+    .nav-item.active::before {
+      left: 20%;
+      right: 20%;
+      top: auto;
+      bottom: 0;
+      width: auto;
+      height: 3px;
+      border-radius: 3px 3px 0 0;
     }
 
     .sidebar-footer {

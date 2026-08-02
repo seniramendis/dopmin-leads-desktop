@@ -59,12 +59,6 @@ const api = {
   /** @param {{ leadId: string, status: string }} payload */
   dbSetStatus: (payload) => ipcRenderer.invoke('db-set-status', payload),
 
-  /** Reads a stored API key. @param {'gemini'|'openrouter'} [provider] */
-  getApiKey: (provider) => ipcRenderer.invoke('get-api-key', provider),
-
-  /** Saves an API key. @param {string} key @param {'gemini'|'openrouter'} [provider] */
-  setApiKey: (key, provider) => ipcRenderer.invoke('set-api-key', { key, provider }),
-
   /** Opens a URL in the system's default browser. @param {string} url */
   openExternalLink: (url) => ipcRenderer.invoke('open-external-link', url),
 
@@ -83,7 +77,10 @@ const api = {
     return () => ipcRenderer.removeListener('analyze-progress', handler)
   },
 
-  dbStats: () => ipcRenderer.invoke('db-stats')
+  dbStats: () => ipcRenderer.invoke('db-stats'),
+
+  /** KPIs + chart data for the Dashboard view. */
+  dbDashboard: () => ipcRenderer.invoke('db-dashboard')
 }
 
 if (process.contextIsolated) {

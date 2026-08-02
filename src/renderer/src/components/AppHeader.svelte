@@ -1,20 +1,18 @@
 <script>
-  export let onOpenSettings = () => {}
+  export let title = 'Lead Search'
+  export let subtitle = 'Extract and qualify local business leads from Google Maps'
 </script>
 
 <header class="topbar">
   <div class="topbar-title">
-    <h1>Lead Search</h1>
-    <p>Extract and qualify local business leads from Google Maps</p>
+    <h1>{title}</h1>
+    <p>{subtitle}</p>
   </div>
   <div class="topbar-right">
     <span class="status-pill">
       <span class="status-dot"></span>
       Local session
     </span>
-    <button class="settings-btn" on:click={onOpenSettings} title="API keys & settings">
-      Settings
-    </button>
   </div>
 </header>
 
@@ -23,7 +21,9 @@
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    padding-bottom: 4px;
+    padding-bottom: 18px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border-soft);
   }
 
   .topbar-title h1 {
@@ -47,21 +47,6 @@
     gap: 8px;
   }
 
-  .settings-btn {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 6px 12px;
-    background: var(--surface);
-    color: var(--text-1);
-    font-size: 0.78rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .settings-btn:hover {
-    background: var(--surface-soft);
-  }
-
   .status-pill {
     display: inline-flex;
     align-items: center;
@@ -81,5 +66,19 @@
     border-radius: 50%;
     background: var(--green);
     flex-shrink: 0;
+    box-shadow: 0 0 0 0 rgba(30, 122, 76, 0.5);
+    animation: pulse 2.2s infinite;
+  }
+
+  @keyframes pulse {
+    0% {
+      box-shadow: 0 0 0 0 rgba(30, 122, 76, 0.45);
+    }
+    70% {
+      box-shadow: 0 0 0 6px rgba(30, 122, 76, 0);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(30, 122, 76, 0);
+    }
   }
 </style>

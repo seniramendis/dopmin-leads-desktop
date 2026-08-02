@@ -1,6 +1,5 @@
 <script>
   import DeepProfilePanel from './DeepProfilePanel.svelte'
-  import { settingsOpen } from '../lib/stores'
 
   export let lead
 
@@ -115,7 +114,6 @@
         leadName={lead.name}
         showUrlInput={false}
         autoRun={true}
-        onOpenSettings={() => settingsOpen.set(true)}
       />
     </div>
   </div>

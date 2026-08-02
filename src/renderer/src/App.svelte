@@ -3,6 +3,7 @@
   import SplashScreen from './components/SplashScreen.svelte'
   import Sidebar from './components/Sidebar.svelte'
   import AppHeader from './components/AppHeader.svelte'
+  import Dashboard from './components/Dashboard.svelte'
   import SearchPanel from './components/SearchPanel.svelte'
   import ProgressBanner from './components/ProgressBanner.svelte'
   import Banner from './components/Banner.svelte'
@@ -10,13 +11,31 @@
   import LeadsPanel from './components/LeadsPanel.svelte'
   import ResultsTable from './components/ResultsTable.svelte'
   import LeadDatabase from './components/LeadDatabase.svelte'
-  import SettingsModal from './components/SettingsModal.svelte'
   import DeepProfilePanel from './components/DeepProfilePanel.svelte'
   import Footer from './components/Footer.svelte'
-  import { settingsOpen } from './lib/stores'
 
   let showSplash = true
-  let view = 'search'
+  let view = 'dashboard'
+
+  const HEADER_COPY = {
+    dashboard: {
+      title: 'Dashboard',
+      subtitle: 'KPIs and trends across every lead you\u2019ve ever scraped'
+    },
+    search: {
+      title: 'Lead Search',
+      subtitle: 'Extract and qualify local business leads from Google Maps'
+    },
+    database: {
+      title: 'Leads Database',
+      subtitle: 'Every lead ever scraped, organized into a pipeline'
+    },
+    profiler: {
+      title: 'AI Profiler',
+      subtitle: 'Deep-profile any business and generate an outreach angle'
+    }
+  }
+  $: headerCopy = HEADER_COPY[view] || HEADER_COPY.search
 
   let query = 'hardware stores in Mount Lavinia'
   let desiredCount = 30
@@ -128,16 +147,14 @@
     <SplashScreen on:done={() => (showSplash = false)} />
   {/if}
 
-  {#if $settingsOpen}
-    <SettingsModal onClose={() => settingsOpen.set(false)} />
-  {/if}
-
   <Sidebar {view} onNavigate={(v) => (view = v)} />
 
   <div class="content">
-    <AppHeader onOpenSettings={() => settingsOpen.set(true)} />
+    <AppHeader title={headerCopy.title} subtitle={headerCopy.subtitle} />
 
-    {#if view === 'database'}
+    {#if view === 'dashboard'}
+      <Dashboard />
+    {:else if view === 'database'}
       <LeadDatabase />
     {:else if view === 'profiler'}
       <section class="card profiler-card">
@@ -147,7 +164,7 @@
           stack, and an optional competitor comparison — then run the AI Analyst for a digital
           maturity score, SWOT, and a ready-to-use outreach angle.
         </p>
-        <DeepProfilePanel showUrlInput={true} onOpenSettings={() => settingsOpen.set(true)} />
+        <DeepProfilePanel showUrlInput={true} />
       </section>
     {:else}
       <SearchPanel bind:query bind:desiredCount {isScraping} onSearch={handleSearch} />

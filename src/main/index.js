@@ -6,8 +6,16 @@ import { scrapeLeads, scrapeSingleBusiness } from './scraper'
 import { runZeroCostAudit } from './auditEngine'
 import { analyzeBusinessProfile } from './analystEngine'
 import { analyzeDomainWithProxy } from './network'
-import { getApiKey, setApiKey } from './secureStore'
-import { upsertLeads, listLeads, countLeads, getLeadHistory, setLeadStatus, getDbStats } from './db'
+import { getApiKey } from './secureStore'
+import {
+  upsertLeads,
+  listLeads,
+  countLeads,
+  getLeadHistory,
+  setLeadStatus,
+  getDbStats,
+  getDashboardStats
+} from './db'
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -138,6 +146,16 @@ function registerIpcHandlers() {
     }
   })
 
+  // Powers the Dashboard view — KPI cards + charts computed straight from
+  // the local leads DB. See getDashboardStats() in db.js for the shape.
+  ipcMain.handle('db-dashboard', () => {
+    try {
+      return { success: true, stats: getDashboardStats() }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+
   // Client Audit Scorecard — runs the local, $0 technical audit on one
   // lead's website (SSL, speed, mobile-responsive, SEO/pixel, abandoned
   // agency detection). See src/main/auditEngine.js.
@@ -176,17 +194,7 @@ function registerIpcHandlers() {
     return scrapeSingleBusiness(url, { competitorUrls }, onProgress)
   })
 
-  // API key storage (Settings modal already called these — they were never
-  // wired up on the main-process side). Provider defaults to 'gemini' for
-  // backward compatibility with the single-key UI that existed before the
-  // OpenRouter fallback (2.5) needed a second key.
-  ipcMain.handle('get-api-key', (_event, provider) => getApiKey(provider || 'gemini'))
-  ipcMain.handle('set-api-key', (_event, { key, provider } = {}) =>
-    setApiKey(key, provider || 'gemini')
-  )
-
-  // SettingsModal's "Google AI Studio" link already called this — also
-  // never wired up.
+  // Opens a URL in the system browser.
   ipcMain.handle('open-external-link', (_event, url) => {
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
       shell.openExternal(url)

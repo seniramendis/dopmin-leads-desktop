@@ -5,7 +5,6 @@
   export let leadName = ''
   export let showUrlInput = true
   export let autoRun = false
-  export let onOpenSettings = null
 
   const CIRC = 2 * Math.PI * 52
 
@@ -402,12 +401,9 @@
       {#if usedFallback}
         <div class="inline-note">
           <span
-            >Showing the quick summary report. Add your own Gemini API key in Settings to unlock
-            the full interactive dashboard — maturity score, KPIs, SWOT, and outreach angle.</span
+            >Showing the quick summary report — the full AI dashboard (maturity score, KPIs, SWOT,
+            outreach angle) is temporarily unavailable. Try refreshing in a moment.</span
           >
-          {#if onOpenSettings}
-            <button class="link-btn" on:click={onOpenSettings}>Open Settings</button>
-          {/if}
         </div>
       {/if}
 
@@ -698,17 +694,6 @@
   .ghost-btn:disabled {
     opacity: 0.5;
     cursor: default;
-  }
-
-  .link-btn {
-    border: none;
-    background: none;
-    color: var(--brand);
-    font-weight: 600;
-    font-size: 0.8rem;
-    cursor: pointer;
-    text-decoration: underline;
-    white-space: nowrap;
   }
 
   /* Stepper */

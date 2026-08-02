@@ -568,3 +568,166 @@ export function getDbStats() {
     .get().n
   return { total, noWebsite, byStatus, recentChanges }
 }
+
+/** Fills in any statuses/rating buckets missing from a raw grouped-count
+ * list so charts always render every category (at 0) instead of shifting
+ * layout depending on what data happens to exist yet. */
+function withZeroFilledCounts(rows, allKeys, keyField) {
+  const byKey = new Map(rows.map((r) => [r[keyField], r.n]))
+  return allKeys.map((key) => ({ [keyField]: key, n: byKey.get(key) || 0 }))
+}
+
+function ratingBucketOf(rating) {
+  if (rating == null) return 'Unrated'
+  if (rating >= 4.5) return '4.5★+'
+  if (rating >= 4.0) return '4.0–4.4★'
+  if (rating >= 3.0) return '3.0–3.9★'
+  return 'Under 3★'
+}
+const RATING_BUCKET_ORDER = ['4.5★+', '4.0–4.4★', '3.0–3.9★', 'Under 3★', 'Unrated']
+
+/**
+ * Everything the Dashboard view needs, computed in a handful of cheap
+ * aggregate queries (never pulls full lead rows into memory). See
+ * Dashboard.svelte for how each piece maps to a KPI card or chart.
+ */
+export function getDashboardStats() {
+  initDb()
+
+  if (db.isFallback) {
+    const leads = Object.values(db.data.leads || {})
+    const history = db.data.lead_history || []
+    const total = leads.length
+    const noWebsite = leads.filter((l) => !l.has_website).length
+    const rated = leads.filter((l) => typeof l.rating === 'number')
+    const avgRating = rated.length
+      ? rated.reduce((sum, l) => sum + l.rating, 0) / rated.length
+      : null
+
+    const byStatus = withZeroFilledCounts(
+      Object.entries(
+        leads.reduce((acc, l) => {
+          acc[l.status] = (acc[l.status] || 0) + 1
+          return acc
+        }, {})
+      ).map(([status, n]) => ({ status, n })),
+      LEAD_STATUSES,
+      'status'
+    )
+
+    const categoryCounts = leads.reduce((acc, l) => {
+      const cat = (l.category || '').trim()
+      if (cat) acc[cat] = (acc[cat] || 0) + 1
+      return acc
+    }, {})
+    const byCategory = Object.entries(categoryCounts)
+      .map(([category, n]) => ({ category, n }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, 6)
+
+    const ratingCounts = leads.reduce((acc, l) => {
+      const bucket = ratingBucketOf(l.rating)
+      acc[bucket] = (acc[bucket] || 0) + 1
+      return acc
+    }, {})
+    const byRating = withZeroFilledCounts(
+      Object.entries(ratingCounts).map(([bucket, n]) => ({ bucket, n })),
+      RATING_BUCKET_ORDER,
+      'bucket'
+    )
+
+    const now = Date.now()
+    const dayMs = 24 * 60 * 60 * 1000
+    const trendDays = Array.from({ length: 14 }, (_, i) => {
+      const d = new Date(now - (13 - i) * dayMs)
+      return d.toISOString().slice(0, 10)
+    })
+    const trendCounts = trendDays.reduce((acc, day) => ({ ...acc, [day]: 0 }), {})
+    for (const l of leads) {
+      const day = (l.first_seen_at || '').slice(0, 10)
+      if (day in trendCounts) trendCounts[day] += 1
+    }
+    const trend = trendDays.map((day) => ({ day, n: trendCounts[day] }))
+
+    const sevenDaysAgo = now - 7 * dayMs
+    const newLast7Days = leads.filter(
+      (l) => new Date(l.first_seen_at).getTime() >= sevenDaysAgo
+    ).length
+    const recentChanges = history.filter(
+      (h) => new Date(h.changed_at).getTime() >= sevenDaysAgo
+    ).length
+
+    return { total, noWebsite, avgRating, byStatus, byCategory, byRating, trend, newLast7Days, recentChanges }
+  }
+
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM leads`).get().n
+  const noWebsite = db.prepare(`SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`).get().n
+  const avgRating = db.prepare(`SELECT AVG(rating) AS v FROM leads WHERE rating IS NOT NULL`).get().v
+
+  const byStatus = withZeroFilledCounts(
+    db.prepare(`SELECT status, COUNT(*) AS n FROM leads GROUP BY status`).all(),
+    LEAD_STATUSES,
+    'status'
+  )
+
+  const byCategory = db
+    .prepare(
+      `SELECT category, COUNT(*) AS n FROM leads
+       WHERE category IS NOT NULL AND TRIM(category) != ''
+       GROUP BY category ORDER BY n DESC LIMIT 6`
+    )
+    .all()
+
+  const ratingRows = db
+    .prepare(
+      `SELECT
+         CASE
+           WHEN rating IS NULL THEN 'Unrated'
+           WHEN rating >= 4.5 THEN '4.5★+'
+           WHEN rating >= 4.0 THEN '4.0–4.4★'
+           WHEN rating >= 3.0 THEN '3.0–3.9★'
+           ELSE 'Under 3★'
+         END AS bucket,
+         COUNT(*) AS n
+       FROM leads GROUP BY bucket`
+    )
+    .all()
+  const byRating = withZeroFilledCounts(ratingRows, RATING_BUCKET_ORDER, 'bucket')
+
+  const trendRows = db
+    .prepare(
+      `SELECT substr(first_seen_at, 1, 10) AS day, COUNT(*) AS n
+       FROM leads
+       WHERE first_seen_at >= datetime('now', '-14 days')
+       GROUP BY day`
+    )
+    .all()
+  const trendByDay = new Map(trendRows.map((r) => [r.day, r.n]))
+  const now = Date.now()
+  const dayMs = 24 * 60 * 60 * 1000
+  const trend = Array.from({ length: 14 }, (_, i) => {
+    const day = new Date(now - (13 - i) * dayMs).toISOString().slice(0, 10)
+    return { day, n: trendByDay.get(day) || 0 }
+  })
+
+  const newLast7Days = db
+    .prepare(`SELECT COUNT(*) AS n FROM leads WHERE first_seen_at >= datetime('now', '-7 days')`)
+    .get().n
+  const recentChanges = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`
+    )
+    .get().n
+
+  return {
+    total,
+    noWebsite,
+    avgRating,
+    byStatus,
+    byCategory,
+    byRating,
+    trend,
+    newLast7Days,
+    recentChanges
+  }
+}
