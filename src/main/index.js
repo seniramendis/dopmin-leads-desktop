@@ -2,6 +2,7 @@ import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import { buildMapsQuery, buildProjectQuery } from './queryExpansion'
 import { scrapeLeads, scrapeSingleBusiness } from './scraper'
 import { runZeroCostAudit } from './auditEngine'
 import { analyzeBusinessProfile } from './analystEngine'
@@ -53,10 +54,21 @@ function registerIpcHandlers() {
     const query = typeof searchData === 'string' ? searchData : searchData.query || ''
     const rawMaxResults = typeof searchData === 'string' ? 20 : (searchData.maxResults ?? 20)
     const maxResults = Math.max(1, Math.min(500, Number(rawMaxResults) || 20))
+    const category =
+      typeof searchData === 'string' ? 'mobile_apps' : searchData.category || 'mobile_apps'
+    const region = typeof searchData === 'string' ? 'local' : searchData.region || 'local'
+    const mode = typeof searchData === 'string' ? 'local_maps' : searchData.mode || 'local_maps'
+    const industry =
+      typeof searchData === 'string' ? 'healthcare' : searchData.industry || 'healthcare'
 
     if (!query.trim()) {
       return { success: false, error: 'Please enter a search query.' }
     }
+
+    const routeQuery =
+      mode === 'it_projects'
+        ? buildProjectQuery(category, region, industry)
+        : buildMapsQuery(query, industry, region)
 
     // Stream live progress (discovery scrolling + per-listing extraction)
     // back to the renderer so long searches (100s of results) give
@@ -71,7 +83,12 @@ function registerIpcHandlers() {
       }
     }
 
-    const result = await scrapeLeads(query, maxResults, onProgress)
+    const result = await scrapeLeads(routeQuery, maxResults, onProgress, {
+      category,
+      region,
+      mode,
+      industry
+    })
 
     // Persist into the local leads database (SQLite, zero cost/server) so
     // the scrape isn't thrown away when the app closes, and so repeat
@@ -101,6 +118,44 @@ function registerIpcHandlers() {
     }
 
     return result
+  })
+
+  ipcMain.handle('start-scrape', async (event, args = {}) => {
+    const search = typeof args === 'string' ? args : args.query || ''
+    const category = typeof args === 'string' ? 'mobile_apps' : args.category || 'mobile_apps'
+    const region = typeof args === 'string' ? 'local' : args.region || 'local'
+    const mode = typeof args === 'string' ? 'local_maps' : args.mode || 'local_maps'
+    const industry = typeof args === 'string' ? 'healthcare' : args.industry || 'healthcare'
+    const maxResults =
+      typeof args === 'string' ? 20 : Math.max(1, Math.min(500, Number(args.maxResults) || 20))
+
+    if (!search.trim()) return []
+
+    const routeQuery =
+      mode === 'it_projects'
+        ? buildProjectQuery(category, region, industry)
+        : buildMapsQuery(search, industry, region)
+
+    const onProgress = (payload) => {
+      try {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('scrape-progress', payload)
+        }
+      } catch {
+        // Window may have closed mid-scrape — safe to ignore.
+      }
+    }
+
+    const result = await scrapeLeads(routeQuery, maxResults, onProgress, {
+      category,
+      region,
+      mode,
+      industry
+    })
+    if (!result.success) {
+      return []
+    }
+    return result.leads || []
   })
 
   // Local Leads Database — the persistent, cross-search dataset. All local

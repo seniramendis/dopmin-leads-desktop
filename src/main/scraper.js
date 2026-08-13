@@ -486,12 +486,12 @@ function toLead(raw, index) {
   }
 }
 
-export async function scrapeLeads(query, maxResults = 20, onProgress) {
+export async function scrapeLeads(query, maxResults = 20, onProgress, options = {}) {
   // Clamp to a sane range but otherwise respect exactly what the user asked
   // for. If Google Maps doesn't actually have that many results, we return
   // everything we genuinely found instead of padding or over-promising.
   const desired = Math.max(1, Math.min(500, Number(maxResults) || 20))
-  const subQueries = expandQuery(query)
+  const subQueries = expandQuery(query, options)
 
   // Fail fast if there's no connection at all, instead of spending 30-60s
   // watching every navigation time out one by one.

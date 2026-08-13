@@ -6,3 +6,7 @@ import { writable } from 'svelte/store'
 // button, and the "Add an API key" prompt that surfaces inline wherever an
 // analysis fails for lack of one (a lead row's modal, the AI Profiler tab).
 export const settingsOpen = writable(false)
+
+// Zero-cost search selections shared across the search UI and backend flow.
+export const searchCategory = writable('mobile_apps')
+export const searchRegion = writable('local')

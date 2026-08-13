@@ -9,6 +9,24 @@ const api = {
   /** @param {{ query: string, maxResults?: number }} searchData */
   startScraping: (searchData) => ipcRenderer.invoke('start-scraping', searchData),
 
+  /** Supports the newer dual-mode frontend API and forwards the selected
+   * category/region/mode/industry values to the main process. */
+  startScrape: (...args) => {
+    if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) {
+      return ipcRenderer.invoke('start-scrape', args[0])
+    }
+
+    const [category, region, mode, industry, query, maxResults] = args
+    return ipcRenderer.invoke('start-scrape', {
+      category,
+      region,
+      mode,
+      industry,
+      query,
+      maxResults
+    })
+  },
+
   /**
    * Subscribe to live progress while a search is running.
    * @param {(payload: object) => void} callback

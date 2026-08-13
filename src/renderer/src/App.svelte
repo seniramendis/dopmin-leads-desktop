@@ -1,5 +1,6 @@
 <script>
   import { onDestroy } from 'svelte'
+  import { searchCategory, searchRegion } from './lib/stores.js'
   import SplashScreen from './components/SplashScreen.svelte'
   import Sidebar from './components/Sidebar.svelte'
   import AppHeader from './components/AppHeader.svelte'
@@ -98,8 +99,14 @@
     }
   }
 
-  async function handleSearch() {
-    if (!query.trim() || isScraping) return
+  async function handleSearch(payload = {}) {
+    const nextQuery = payload.query ?? query
+    const nextCategory = payload.category ?? $searchCategory
+    const nextRegion = payload.region ?? $searchRegion
+    const mode = payload.mode ?? 'it_projects'
+    const industry = payload.industry ?? 'healthcare'
+
+    if (!nextQuery.trim() || isScraping) return
 
     isScraping = true
     errorMessage = ''
@@ -108,7 +115,10 @@
     hasSearched = true
     resetProgress()
 
-    const count = Math.max(1, Math.min(500, Math.floor(Number(desiredCount)) || 30))
+    const count = Math.max(
+      1,
+      Math.min(500, Math.floor(Number(payload.desiredCount ?? desiredCount)) || 30)
+    )
     desiredCount = count
 
     if (!unsubscribeProgress && window.api.onScrapeProgress) {
@@ -116,7 +126,14 @@
     }
 
     try {
-      const response = await window.api.startScraping({ query, maxResults: count })
+      const response = await window.api.startScraping({
+        query: nextQuery,
+        maxResults: count,
+        category: nextCategory,
+        region: nextRegion,
+        mode,
+        industry
+      })
       if (response.success) {
         leads = response.leads
         totalFound = response.totalFound ?? response.leads.length
