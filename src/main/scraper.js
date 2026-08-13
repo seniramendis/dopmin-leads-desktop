@@ -27,7 +27,7 @@ import {
   SLOW_NAV_THRESHOLD_MS,
   MAX_CONSECUTIVE_NETWORK_FAILURES
 } from './constants'
-import { expandQuery } from './queryExpansion'
+import { expandQuery, broadenQuery } from './queryExpansion'
 import { checkInternetConnection, NetworkHealth, ConnectionLostError } from './network'
 import { scrapeBusinessProfile } from './businessProfiler'
 
@@ -387,10 +387,15 @@ async function runDetailPool(context, listings, concurrency, onProgress, network
  * href as it goes, and stops as soon as `desired` unique listings are
  * found (or every sub-query has been tried).
  */
-async function discoverListings(context, subQueries, desired, onProgress, networkHealth) {
-  const listings = []
-  const seenHrefs = new Set()
-  const isExpanded = subQueries.length > 1
+async function discoverListings(
+  context,
+  subQueries,
+  desired,
+  onProgress,
+  networkHealth,
+  { listings = [], seenHrefs = new Set(), isExpanded } = {}
+) {
+  isExpanded = isExpanded ?? subQueries.length > 1
   let rateLimited = false
   let launched = 0
 
@@ -456,7 +461,7 @@ async function discoverListings(context, subQueries, desired, onProgress, networ
   const concurrency = isExpanded ? DISCOVERY_CONCURRENCY : 1
   await mapWithConcurrency(subQueries, concurrency, runSubQuery)
 
-  return { listings, isExpanded }
+  return { listings, seenHrefs, isExpanded, rateLimited }
 }
 
 function toLead(raw, index) {
@@ -525,13 +530,41 @@ export async function scrapeLeads(query, maxResults = 20, onProgress, options = 
   await blockHeavyResources(context)
 
   try {
-    const { listings, isExpanded } = await discoverListings(
+    let { listings, seenHrefs, isExpanded, rateLimited } = await discoverListings(
       context,
       subQueries,
       desired,
       onProgress,
       networkHealth
     )
+
+    // The user's own query ("hardware stores in Mount Lavinia") wasn't
+    // fanned out above since it already named a category — but if it came
+    // back thin, broaden it anyway using the same category fan-out bare
+    // place names get, anchored to the same place, instead of just
+    // returning a short list. Skipped if we already tried every category
+    // (isExpanded), got rate-limited, or the connection died.
+    let queriesUsed = subQueries
+    if (!isExpanded && listings.length < desired && !rateLimited && !networkHealth.aborted) {
+      const broaderQueries = broadenQuery(subQueries[0], subQueries)
+      if (broaderQueries.length > 0) {
+        onProgress?.({
+          phase: 'searching',
+          message: `Only found ${listings.length} — broadening the search to related categories nearby…`
+        })
+        const broadened = await discoverListings(
+          context,
+          broaderQueries,
+          desired,
+          onProgress,
+          networkHealth,
+          { listings, seenHrefs, isExpanded: true }
+        )
+        listings = broadened.listings
+        isExpanded = true
+        queriesUsed = [...subQueries, ...broaderQueries]
+      }
+    }
 
     if (networkHealth.aborted) throw new ConnectionLostError()
 
@@ -544,7 +577,7 @@ export async function scrapeLeads(query, maxResults = 20, onProgress, options = 
         truncated: false,
         failedCount: 0,
         expanded: isExpanded,
-        queriesUsed: subQueries
+        queriesUsed
       }
     }
 
@@ -578,7 +611,7 @@ export async function scrapeLeads(query, maxResults = 20, onProgress, options = 
       truncated: listings.length > desired, // true if more exist beyond what was returned
       failedCount, // listings that couldn't be read even after retries
       expanded: isExpanded, // true if we broadened a bare place name into categories
-      queriesUsed: subQueries
+      queriesUsed
     }
   } catch (error) {
     const errorType = error instanceof ConnectionLostError ? 'offline' : undefined

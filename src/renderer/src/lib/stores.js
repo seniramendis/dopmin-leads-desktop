@@ -9,4 +9,4 @@ export const settingsOpen = writable(false)
 
 // Zero-cost search selections shared across the search UI and backend flow.
 export const searchCategory = writable('mobile_apps')
-export const searchRegion = writable('local')
+export const searchRegion = writable('worldwide')

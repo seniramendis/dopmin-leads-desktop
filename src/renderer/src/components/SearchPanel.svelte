@@ -2,46 +2,43 @@
 <script>
   import { searchCategory, searchRegion } from '../lib/stores.js'
 
-  let activeTab = 'maps'
+  // Passed down from App.svelte, which owns the actual search/progress
+  // state and talks to the backend via window.api.startScraping +
+  // onScrapeProgress — this component just collects the form inputs and
+  // hands off a single search payload.
+  export let query = 'hardware stores in Mount Lavinia'
+  export let desiredCount = 30
+  export let isScraping = false
+  export let onSearch = () => {}
 
-  // Tab 1: Local Google Maps State
-  let searchQuery = 'hardware stores in Mount'
-  let maxResults = 30
+  let activeTab = 'maps'
 
   // Tab 2: IT Projects State
   let projectSource = 'rfp_boards'
   let industry = 'healthcare'
-  let isScanning = false
 
-  async function handleMapsSearch() {
-    isScanning = true
-    try {
-      await window.api.startMapsScrape({
-        query: searchQuery,
-        maxResults,
-        region: $searchRegion
-      })
-    } catch (err) {
-      console.error('Maps search error:', err)
-    } finally {
-      isScanning = false
-    }
+  function handleMapsSearch() {
+    onSearch({
+      query,
+      desiredCount,
+      region: $searchRegion,
+      mode: 'local_maps'
+    })
   }
 
-  async function handleProjectSearch() {
-    isScanning = true
-    try {
-      await window.api.startProjectScrape({
-        category: $searchCategory,
-        region: $searchRegion,
-        source: projectSource,
-        industry
-      })
-    } catch (err) {
-      console.error('Project search error:', err)
-    } finally {
-      isScanning = false
-    }
+  function handleProjectSearch() {
+    onSearch({
+      // The IT-projects route builds its own search string from
+      // category/region/industry/source — this text is only a fallback so
+      // the shared "please enter a query" check never blocks this tab.
+      query: `${$searchCategory} projects`,
+      desiredCount: 50,
+      category: $searchCategory,
+      region: $searchRegion,
+      source: projectSource,
+      industry,
+      mode: 'it_projects'
+    })
   }
 </script>
 
@@ -75,12 +72,13 @@
       <div class="form-grid">
         <div class="input-group">
           <label>Search Query / Location</label>
-          <input type="text" bind:value={searchQuery} placeholder="e.g. Mount Lavinia" />
+          <input type="text" bind:value={query} placeholder="e.g. Mount Lavinia" />
         </div>
 
         <div class="input-group">
           <label>Region</label>
           <select bind:value={$searchRegion}>
+            <option value="worldwide">Worldwide</option>
             <option value="local">Sri Lanka</option>
             <option value="australia">Australia</option>
             <option value="new_zealand">New Zealand</option>
@@ -92,7 +90,7 @@
 
         <div class="input-group">
           <label>Max Results</label>
-          <input type="number" bind:value={maxResults} />
+          <input type="number" bind:value={desiredCount} />
         </div>
       </div>
 
@@ -101,8 +99,8 @@
           Results are pulled directly from Google Maps listings. Search terms like town names expand
           automatically across matching local categories.
         </p>
-        <button class="primary-btn" on:click={handleMapsSearch} disabled={isScanning}>
-          {isScanning ? 'Scanning...' : 'Search Maps'}
+        <button class="primary-btn" on:click={handleMapsSearch} disabled={isScraping}>
+          {isScraping ? 'Scanning...' : 'Search Maps'}
         </button>
       </div>
 
@@ -148,6 +146,7 @@
         <div class="input-group">
           <label>Target Region</label>
           <select bind:value={$searchRegion}>
+            <option value="worldwide">Worldwide</option>
             <option value="local">Sri Lanka</option>
             <option value="australia">Australia</option>
             <option value="new_zealand">New Zealand</option>
@@ -163,8 +162,8 @@
           Filters target active project postings directly across designated directories while
           automatically filtering out blog articles.
         </p>
-        <button class="primary-btn" on:click={handleProjectSearch} disabled={isScanning}>
-          {isScanning ? 'Finding Projects...' : 'Find IT Projects'}
+        <button class="primary-btn" on:click={handleProjectSearch} disabled={isScraping}>
+          {isScraping ? 'Finding Projects...' : 'Find IT Projects'}
         </button>
       </div>
     {/if}

@@ -101,10 +101,13 @@
 
   async function handleSearch(payload = {}) {
     const nextQuery = payload.query ?? query
-    const nextCategory = payload.category ?? $searchCategory
     const nextRegion = payload.region ?? $searchRegion
-    const mode = payload.mode ?? 'it_projects'
-    const industry = payload.industry ?? 'healthcare'
+    const mode = payload.mode ?? 'local_maps'
+    // category/industry only apply to the IT Projects/RFP route — leaving
+    // them undefined for a plain Maps search keeps "healthcare"/
+    // "mobile_apps" from silently attaching to every Maps lookup.
+    const nextCategory = mode === 'it_projects' ? (payload.category ?? $searchCategory) : undefined
+    const industry = mode === 'it_projects' ? (payload.industry ?? 'healthcare') : undefined
 
     if (!nextQuery.trim() || isScraping) return
 

@@ -2,25 +2,21 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 // Custom APIs for renderer
 const api = {
-  // 1. The Original Maps Route
-  startMapsScrape: (params) => ipcRenderer.invoke('start-maps-scrape', params),
+  /** Runs a search (Google Maps local leads, or IT Projects/RFPs when
+   * payload.mode === 'it_projects') and returns the final result.
+   * @param {{ query: string, maxResults?: number, category?: string, region?: string, mode?: string, industry?: string, source?: string }} payload */
+  startScraping: (payload) => ipcRenderer.invoke('start-scraping', payload),
 
-  // 2. The New B2B IT Projects Route
-  startProjectScrape: (params) => ipcRenderer.invoke('start-project-scrape', params)
-}
-
-if (process.contextIsolated) {
-  try {
-    contextBridge.exposeInMainWorld('api', api)
-  } catch (error) {
-    console.error(error)
-  }
-} else {
-  window.api = api
-}
-
-// Export for internal use in preload script
-export { api }
+  /** Subscribe to live progress while a search is in flight — discovery
+   * scrolling, per-listing extraction, and connection-quality warnings
+   * ('connection-slow' / 'connection-lost').
+   * @param {(payload: object) => void} callback
+   * @returns {() => void} unsubscribe function — call on component teardown */
+  onScrapeProgress: (callback) => {
+    const handler = (_event, payload) => callback(payload)
+    ipcRenderer.on('scrape-progress', handler)
+    return () => ipcRenderer.removeListener('scrape-progress', handler)
+  },
 
   /** Runs the local $0 audit (SSL/speed/mobile/SEO/abandoned-agency) on a
    * lead's website. @param {string} url */
@@ -94,3 +90,6 @@ if (process.contextIsolated) {
 } else {
   window.api = api
 }
+
+// Export for internal use in preload script
+export { api }

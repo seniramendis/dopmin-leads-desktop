@@ -3,7 +3,41 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildPlatformProjectQuery } from './queryExpansion'
-import * as scraper from './scraper'
+import { scrapeLeads, scrapeSingleBusiness } from './scraper'
+
+// Friendly location hints appended to a Google Maps search when the user
+// picks a specific region, so "hardware stores" + region=australia
+// searches Maps for the right country instead of relying on the user to
+// type it themselves. "worldwide" (the default) adds no hint at all, so
+// a plain query searches Google Maps globally exactly as typed — the
+// listed regions are just a shortcut for quickly narrowing to a place the
+// user already searches often, not a restriction on where search can go.
+const MAPS_REGION_HINTS = {
+  worldwide: '',
+  local: 'Sri Lanka',
+  australia: 'Australia',
+  new_zealand: 'New Zealand',
+  dubai: 'Dubai, UAE',
+  usa: 'United States',
+  europe: 'Europe'
+}
+
+/** Builds the actual text sent to Google Maps for the "Local Business
+ * Search" tab. The query itself already carries the place name (e.g.
+ * "hardware stores in Mount Lavinia") — this only appends a region hint
+ * when the user picked somewhere other than the default, so the same
+ * query text reliably targets the right country. */
+function buildMapsQuery(query, region) {
+  const hint = MAPS_REGION_HINTS[region]
+  const trimmed = query.trim()
+  if (!hint || trimmed.toLowerCase().includes(hint.toLowerCase())) return trimmed
+  return `${trimmed} ${hint}`
+}
+
+/** Builds the boolean search string for the "IT Projects & RFPs" tab. */
+function buildProjectQuery(category, region, industry, source) {
+  return buildPlatformProjectQuery(source, category, region, industry)
+}
 import { runZeroCostAudit } from './auditEngine'
 import { analyzeBusinessProfile } from './analystEngine'
 import { analyzeDomainWithProxy } from './network'
@@ -54,13 +88,17 @@ function registerIpcHandlers() {
     const query = typeof searchData === 'string' ? searchData : searchData.query || ''
     const rawMaxResults = typeof searchData === 'string' ? 20 : (searchData.maxResults ?? 20)
     const maxResults = Math.max(1, Math.min(500, Number(rawMaxResults) || 20))
-    const category =
-      typeof searchData === 'string' ? 'mobile_apps' : searchData.category || 'mobile_apps'
-    const region = typeof searchData === 'string' ? 'local' : searchData.region || 'local'
+    const region = typeof searchData === 'string' ? 'worldwide' : searchData.region || 'worldwide'
     const mode = typeof searchData === 'string' ? 'local_maps' : searchData.mode || 'local_maps'
-    const industry =
-      typeof searchData === 'string' ? 'healthcare' : searchData.industry || 'healthcare'
-    const source = typeof searchData === 'string' ? 'rfp_boards' : searchData.source || 'rfp_boards'
+
+    // category/industry/source only mean anything for the IT Projects/RFP
+    // route — defaulting them for a plain Google Maps search was leaking
+    // "healthcare"/"mobile_apps" into every Maps lookup even though the
+    // user never chose them. Only default (and use) them when they're
+    // actually going to be read, i.e. mode === 'it_projects'.
+    const category = mode === 'it_projects' ? searchData.category || 'mobile_apps' : undefined
+    const industry = mode === 'it_projects' ? searchData.industry || 'healthcare' : undefined
+    const source = mode === 'it_projects' ? searchData.source || 'rfp_boards' : undefined
 
     if (!query.trim()) {
       return { success: false, error: 'Please enter a search query.' }
@@ -69,11 +107,12 @@ function registerIpcHandlers() {
     const routeQuery =
       mode === 'it_projects'
         ? buildProjectQuery(category, region, industry, source)
-        : buildMapsQuery(query, industry, region)
+        : buildMapsQuery(query, region)
 
-    // Stream live progress (discovery scrolling + per-listing extraction)
-    // back to the renderer so long searches (100s of results) give
-    // real-time feedback instead of a single spinner.
+    // Stream live progress (discovery scrolling + per-listing extraction,
+    // plus connection-quality warnings) back to the renderer so long
+    // searches give real-time feedback instead of a single spinner, and so
+    // a bad connection surfaces immediately instead of hanging silently.
     const onProgress = (payload) => {
       try {
         if (!event.sender.isDestroyed()) {
@@ -84,13 +123,19 @@ function registerIpcHandlers() {
       }
     }
 
-    const result = await scrapeLeads(routeQuery, maxResults, onProgress, {
-      category,
-      region,
-      mode,
-      industry,
-      source
-    })
+    let result
+    try {
+      result = await scrapeLeads(routeQuery, maxResults, onProgress, {
+        category,
+        region,
+        mode,
+        industry,
+        source
+      })
+    } catch (error) {
+      console.error('Scrape failed:', error)
+      return { success: false, error: error.message || 'Scraping failed unexpectedly.' }
+    }
 
     // Persist into the local leads database (SQLite, zero cost/server) so
     // the scrape isn't thrown away when the app closes, and so repeat
@@ -120,93 +165,6 @@ function registerIpcHandlers() {
     }
 
     return result
-  })
-
-  ipcMain.handle('start-scrape', async (event, args = {}) => {
-    const search = typeof args === 'string' ? args : args.query || ''
-    const category = typeof args === 'string' ? 'mobile_apps' : args.category || 'mobile_apps'
-    const region = typeof args === 'string' ? 'local' : args.region || 'local'
-    const mode = typeof args === 'string' ? 'local_maps' : args.mode || 'local_maps'
-    const industry = typeof args === 'string' ? 'healthcare' : args.industry || 'healthcare'
-    const source = typeof args === 'string' ? 'rfp_boards' : args.source || 'rfp_boards'
-    const maxResults =
-      typeof args === 'string' ? 20 : Math.max(1, Math.min(500, Number(args.maxResults) || 20))
-
-    if (!search.trim()) return []
-
-    const routeQuery =
-      mode === 'it_projects'
-        ? buildProjectQuery(category, region, industry, source)
-        : buildMapsQuery(search, industry, region)
-
-    const onProgress = (payload) => {
-      try {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('scrape-progress', payload)
-        }
-      } catch {
-        // Window may have closed mid-scrape — safe to ignore.
-      }
-    }
-
-    const result = await scrapeLeads(routeQuery, maxResults, onProgress, {
-      category,
-      region,
-      mode,
-      industry,
-      source
-    })
-    if (!result.success) {
-      return []
-    }
-    return result.leads || []
-  })
-
-  // =================================================================
-  // ROUTE 1: ORIGINAL GOOGLE MAPS ENGINE (Untouched)
-  // =================================================================
-  ipcMain.handle('start-maps-scrape', async (event, params) => {
-    console.log('[Backend] Triggering Original Maps Scraper with:', params)
-
-    try {
-      // Pass parameters to the original scraper function
-      const results = await scraper.scrapeLeads(params.query, params.maxResults, undefined, {
-        mode: 'local_maps',
-        region: params.region
-      })
-      return results.leads || []
-    } catch (error) {
-      console.error('Maps Scrape Failed:', error)
-      return []
-    }
-  })
-
-  // =================================================================
-  // ROUTE 2: NEW IT PROJECTS & RFPs ENGINE
-  // =================================================================
-  ipcMain.handle('start-project-scrape', async (event, params) => {
-    console.log('[Backend] Triggering IT Projects Scraper with:', params)
-    const { category, region, source, industry } = params
-
-    try {
-      // 1. Build the targeted B2B footprint (ignoring blogs/news)
-      const searchQuery = buildPlatformProjectQuery(source, category, region, industry)
-      console.log('[Backend] Generated Project Footprint:', searchQuery)
-
-      // 2. Pass this highly targeted query to the scraper
-      const projectResults = await scraper.scrapeLeads(searchQuery, 50, undefined, {
-        mode: 'it_projects',
-        category,
-        region,
-        source,
-        industry
-      })
-
-      return projectResults.leads || []
-    } catch (error) {
-      console.error('Project Scrape Failed:', error)
-      return []
-    }
   })
 
   // Local Leads Database — the persistent, cross-search dataset. All local
