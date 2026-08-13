@@ -1,42 +1,26 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-/**
- * The only surface the renderer gets. Every call here is a thin proxy to
- * a specific `ipcMain.handle` in src/main/index.js — no arbitrary channel
- * access, no Node globals leak into the page.
- */
+// Custom APIs for renderer
 const api = {
-  /** @param {{ query: string, maxResults?: number }} searchData */
-  startScraping: (searchData) => ipcRenderer.invoke('start-scraping', searchData),
+  // 1. The Original Maps Route
+  startMapsScrape: (params) => ipcRenderer.invoke('start-maps-scrape', params),
 
-  /** Supports the newer dual-mode frontend API and forwards the selected
-   * category/region/mode/industry values to the main process. */
-  startScrape: (...args) => {
-    if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) {
-      return ipcRenderer.invoke('start-scrape', args[0])
-    }
+  // 2. The New B2B IT Projects Route
+  startProjectScrape: (params) => ipcRenderer.invoke('start-project-scrape', params)
+}
 
-    const [category, region, mode, industry, query, maxResults] = args
-    return ipcRenderer.invoke('start-scrape', {
-      category,
-      region,
-      mode,
-      industry,
-      query,
-      maxResults
-    })
-  },
+if (process.contextIsolated) {
+  try {
+    contextBridge.exposeInMainWorld('api', api)
+  } catch (error) {
+    console.error(error)
+  }
+} else {
+  window.api = api
+}
 
-  /**
-   * Subscribe to live progress while a search is running.
-   * @param {(payload: object) => void} callback
-   * @returns {() => void} unsubscribe function — call on component teardown
-   */
-  onScrapeProgress: (callback) => {
-    const handler = (_event, payload) => callback(payload)
-    ipcRenderer.on('scrape-progress', handler)
-    return () => ipcRenderer.removeListener('scrape-progress', handler)
-  },
+// Export for internal use in preload script
+export { api }
 
   /** Runs the local $0 audit (SSL/speed/mobile/SEO/abandoned-agency) on a
    * lead's website. @param {string} url */

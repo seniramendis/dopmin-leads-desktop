@@ -2,8 +2,8 @@ import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { buildMapsQuery, buildProjectQuery } from './queryExpansion'
-import { scrapeLeads, scrapeSingleBusiness } from './scraper'
+import { buildPlatformProjectQuery } from './queryExpansion'
+import * as scraper from './scraper'
 import { runZeroCostAudit } from './auditEngine'
 import { analyzeBusinessProfile } from './analystEngine'
 import { analyzeDomainWithProxy } from './network'
@@ -60,6 +60,7 @@ function registerIpcHandlers() {
     const mode = typeof searchData === 'string' ? 'local_maps' : searchData.mode || 'local_maps'
     const industry =
       typeof searchData === 'string' ? 'healthcare' : searchData.industry || 'healthcare'
+    const source = typeof searchData === 'string' ? 'rfp_boards' : searchData.source || 'rfp_boards'
 
     if (!query.trim()) {
       return { success: false, error: 'Please enter a search query.' }
@@ -67,7 +68,7 @@ function registerIpcHandlers() {
 
     const routeQuery =
       mode === 'it_projects'
-        ? buildProjectQuery(category, region, industry)
+        ? buildProjectQuery(category, region, industry, source)
         : buildMapsQuery(query, industry, region)
 
     // Stream live progress (discovery scrolling + per-listing extraction)
@@ -87,7 +88,8 @@ function registerIpcHandlers() {
       category,
       region,
       mode,
-      industry
+      industry,
+      source
     })
 
     // Persist into the local leads database (SQLite, zero cost/server) so
@@ -126,6 +128,7 @@ function registerIpcHandlers() {
     const region = typeof args === 'string' ? 'local' : args.region || 'local'
     const mode = typeof args === 'string' ? 'local_maps' : args.mode || 'local_maps'
     const industry = typeof args === 'string' ? 'healthcare' : args.industry || 'healthcare'
+    const source = typeof args === 'string' ? 'rfp_boards' : args.source || 'rfp_boards'
     const maxResults =
       typeof args === 'string' ? 20 : Math.max(1, Math.min(500, Number(args.maxResults) || 20))
 
@@ -133,7 +136,7 @@ function registerIpcHandlers() {
 
     const routeQuery =
       mode === 'it_projects'
-        ? buildProjectQuery(category, region, industry)
+        ? buildProjectQuery(category, region, industry, source)
         : buildMapsQuery(search, industry, region)
 
     const onProgress = (payload) => {
@@ -150,12 +153,60 @@ function registerIpcHandlers() {
       category,
       region,
       mode,
-      industry
+      industry,
+      source
     })
     if (!result.success) {
       return []
     }
     return result.leads || []
+  })
+
+  // =================================================================
+  // ROUTE 1: ORIGINAL GOOGLE MAPS ENGINE (Untouched)
+  // =================================================================
+  ipcMain.handle('start-maps-scrape', async (event, params) => {
+    console.log('[Backend] Triggering Original Maps Scraper with:', params)
+
+    try {
+      // Pass parameters to the original scraper function
+      const results = await scraper.scrapeLeads(params.query, params.maxResults, undefined, {
+        mode: 'local_maps',
+        region: params.region
+      })
+      return results.leads || []
+    } catch (error) {
+      console.error('Maps Scrape Failed:', error)
+      return []
+    }
+  })
+
+  // =================================================================
+  // ROUTE 2: NEW IT PROJECTS & RFPs ENGINE
+  // =================================================================
+  ipcMain.handle('start-project-scrape', async (event, params) => {
+    console.log('[Backend] Triggering IT Projects Scraper with:', params)
+    const { category, region, source, industry } = params
+
+    try {
+      // 1. Build the targeted B2B footprint (ignoring blogs/news)
+      const searchQuery = buildPlatformProjectQuery(source, category, region, industry)
+      console.log('[Backend] Generated Project Footprint:', searchQuery)
+
+      // 2. Pass this highly targeted query to the scraper
+      const projectResults = await scraper.scrapeLeads(searchQuery, 50, undefined, {
+        mode: 'it_projects',
+        category,
+        region,
+        source,
+        industry
+      })
+
+      return projectResults.leads || []
+    } catch (error) {
+      console.error('Project Scrape Failed:', error)
+      return []
+    }
   })
 
   // Local Leads Database — the persistent, cross-search dataset. All local
