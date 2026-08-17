@@ -1,6 +1,70 @@
-node_modules
-dist
-out
+# ============================================================
+# SECRETS — never commit any .env files including examples
+# ============================================================
+.env
+.env.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production
+.env.production.local
+*.env
+.env.*
+.env.example
+**/.env.example
+*.env.example
+
+# ============================================================
+# Dependencies
+# ============================================================
+node_modules/
+**/node_modules/
+
+# ============================================================
+# Python (backend/)
+# ============================================================
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# ============================================================
+# Vercel (bridge/)
+# ============================================================
+.vercel/
+
+# ============================================================
+# Electron / Vite build output (client/)
+# ============================================================
+client/out/
+client/dist/
+client/build/
+!client/build/icon.*
+client/.electron-vite/
+release/
+out/
+
+# ============================================================
+# Logs
+# ============================================================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# ============================================================
+# Embedded keys (filled before a customer build — never commit)
+# ============================================================
+src/main/embeddedKeys.js
+!src/main/embeddedKeys.example.js
+
+# ============================================================
+# OS / editor junk
+# ============================================================
 .DS_Store
-.eslintcache
-*.log*
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json

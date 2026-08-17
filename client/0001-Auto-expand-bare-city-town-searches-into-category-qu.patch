@@ -1,0 +1,325 @@
+From 8a9b0fa3543f3133caa2befb27c44e2c2756cdf3 Mon Sep 17 00:00:00 2001
+From: Fc <fc@dopmin.dev>
+Date: Wed, 29 Jul 2026 20:39:38 +0000
+Subject: [PATCH] Auto-expand bare city/town searches into category queries;
+ add no-website filter
+
+---
+ src/main/scraper.js         | 133 +++++++++++++++++++++++++++++++-----
+ src/renderer/src/App.svelte |  61 +++++++++++++++--
+ 2 files changed, 171 insertions(+), 23 deletions(-)
+
+diff --git a/src/main/scraper.js b/src/main/scraper.js
+index e10215d..4686014 100644
+--- a/src/main/scraper.js
++++ b/src/main/scraper.js
+@@ -34,6 +34,71 @@ const MAX_DETAIL_RETRIES = 2
+ 
+ const NAV_TIMEOUT_MS = 30000
+ 
++// Words that signal the user already told us what KIND of business they
++// want (e.g. "restaurants in Kandy", "hardware stores near Galle"). If a
++// query contains none of these, it's almost certainly just a place name
++// ("Mount Lavinia", "Kalutara town") — and Google Maps returns weak/empty
++// results for a bare place with no category, so we expand it ourselves.
++const BUSINESS_TYPE_HINTS = [
++  'store', 'stores', 'shop', 'shops', 'restaurant', 'restaurants', 'hotel',
++  'hotels', 'salon', 'salons', 'spa', 'garage', 'mechanic', 'clinic',
++  'clinics', 'hospital', 'pharmacy', 'pharmacies', 'bakery', 'bakeries',
++  'gym', 'gyms', 'dealer', 'dealers', 'agency', 'agencies', 'firm', 'firms',
++  'service', 'services', 'repair', 'market', 'supermarket', 'supermarkets',
++  'cafe', 'cafes', 'bar', 'bars', 'school', 'schools', 'boutique',
++  'workshop', 'electrician', 'electricians', 'plumber', 'plumbers',
++  'lawyer', 'lawyers', 'accountant', 'accountants', 'contractor',
++  'contractors', 'furniture', 'electronics', 'grocery', 'groceries',
++  'bank', 'banks', 'jewel', 'jeweller', 'jewelers', 'tailor', 'tailors',
++  'printer', 'printers', 'photographer', 'photographers', 'apartments',
++  'real estate', 'realtor', 'realtors', 'clothing', 'wear', 'mobile',
++  'phone', 'computer', 'computers', 'hardware', 'construction'
++]
++
++// Default set of categories we fan a bare place name out into. Kept broad
++// and locally-relevant (Sri Lankan small-business landscape) rather than
++// exhaustive, since the loop below stops as soon as enough leads are found
++// — later categories only run if earlier ones didn't fill the quota.
++const DEFAULT_CATEGORY_EXPANSION = [
++  'restaurants',
++  'hotels',
++  'shops',
++  'supermarkets',
++  'pharmacies',
++  'hardware stores',
++  'salons',
++  'auto repair shops',
++  'electronics stores',
++  'clothing stores',
++  'bakeries',
++  'clinics',
++  'gyms',
++  'furniture stores',
++  'law firms',
++  'real estate agents',
++  'construction companies',
++  'schools',
++  'grocery stores',
++  'mobile phone shops'
++]
++
++function looksLikeBarePlaceName(query) {
++  const q = query.toLowerCase()
++  return !BUSINESS_TYPE_HINTS.some((hint) => q.includes(hint))
++}
++
++/** Turns a single user query into a list of queries to actually run against
++ * Google Maps. If the user already specified a business type, we run
++ * exactly that one query unchanged. If it looks like a bare city/town name,
++ * we fan it out into "<category> in <place>" for a broad set of common
++ * local business categories, so a search like "Mount Lavinia" alone still
++ * turns up real businesses instead of a near-empty result. */
++function expandQuery(query) {
++  const trimmed = query.trim()
++  if (!looksLikeBarePlaceName(trimmed)) return [trimmed]
++  return DEFAULT_CATEGORY_EXPANSION.map((category) => `${category} in ${trimmed}`)
++}
++
+ function classifyReputation(rating) {
+   if (rating === null || Number.isNaN(rating)) return 'unrated'
+   if (rating >= REPUTATION_THRESHOLDS.excellent) return 'excellent'
+@@ -325,25 +390,55 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
+   })
+ 
+   try {
+-    const listPage = await context.newPage()
+-    const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}?hl=en`
++    const subQueries = expandQuery(query)
++    const isExpanded = subQueries.length > 1
++    const listings = []
++    const seenHrefs = new Set()
+ 
+-    onProgress?.({ phase: 'searching', message: `Opening Google Maps for "${query}"…` })
+-    await listPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
++    for (let i = 0; i < subQueries.length && listings.length < desired; i += 1) {
++      const subQuery = subQueries[i]
++      const listPage = await context.newPage()
++      const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(subQuery)}?hl=en`
+ 
+-    if (await isBlockedPage(listPage)) {
+-      await listPage.close()
+-      return {
+-        success: false,
+-        error: 'Google temporarily rate-limited this search. Wait a bit and try again.'
+-      }
+-    }
++      onProgress?.({
++        phase: 'searching',
++        message: isExpanded
++          ? `"${query}" has no business type, so we're broadening the search — trying "${subQuery}" (${i + 1}/${subQueries.length})…`
++          : `Opening Google Maps for "${subQuery}"…`
++      })
++
++      try {
++        await listPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
++
++        if (await isBlockedPage(listPage)) {
++          await listPage.close()
++          // If we already have some results from earlier sub-queries, keep
++          // them rather than failing the whole search over one rate limit.
++          if (listings.length > 0) break
++          return {
++            success: false,
++            error: 'Google temporarily rate-limited this search. Wait a bit and try again.'
++          }
++        }
+ 
+-    await dismissConsentIfPresent(listPage)
+-    await listPage.waitForTimeout(2500)
++        await dismissConsentIfPresent(listPage)
++        await listPage.waitForTimeout(2500)
+ 
+-    const listings = await collectListingUrls(listPage, desired, onProgress)
+-    await listPage.close()
++        const remaining = desired - listings.length
++        const found = await collectListingUrls(listPage, remaining, onProgress)
++        for (const item of found) {
++          if (seenHrefs.has(item.href)) continue
++          seenHrefs.add(item.href)
++          listings.push(item)
++          if (listings.length >= desired) break
++        }
++      } catch {
++        // One sub-query failing (nav error/timeout) shouldn't kill the
++        // whole search — move on to the next category.
++      } finally {
++        await listPage.close().catch(() => {})
++      }
++    }
+ 
+     if (listings.length === 0) {
+       return {
+@@ -352,7 +447,9 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
+         requested: desired,
+         totalFound: 0,
+         truncated: false,
+-        failedCount: 0
++        failedCount: 0,
++        expanded: isExpanded,
++        queriesUsed: subQueries
+       }
+     }
+ 
+@@ -404,7 +501,9 @@ export async function scrapeLeads(query, maxResults = 20, onProgress) {
+       requested: desired,
+       totalFound: listings.length, // how many unique businesses were actually found
+       truncated: listings.length > desired, // true if more exist beyond what was returned
+-      failedCount // listings that couldn't be read even after retries
++      failedCount, // listings that couldn't be read even after retries
++      expanded: isExpanded, // true if we broadened a bare place name into categories
++      queriesUsed: subQueries
+     }
+   } catch (error) {
+     return { success: false, error: error.message }
+diff --git a/src/renderer/src/App.svelte b/src/renderer/src/App.svelte
+index 5a72147..2afcc49 100644
+--- a/src/renderer/src/App.svelte
++++ b/src/renderer/src/App.svelte
+@@ -11,6 +11,9 @@
+   let truncated = false
+   let failedCount = 0
+   let hasSearched = false
++  let wasExpanded = false
++  let queriesUsed = []
++  let onlyNoWebsite = true
+ 
+   // Live progress while a search is in flight.
+   let progressPhase = '' // '' | 'searching' | 'discovering' | 'extracting' | 'done'
+@@ -25,6 +28,7 @@
+     .filter((l) => l.isReputationRisk)
+     .sort((a, b) => (a.rating ?? 5) - (b.rating ?? 5))
+   $: noWebsiteCount = leads.filter((l) => !l.hasWebsite).length
++  $: visibleLeads = onlyNoWebsite ? leads.filter((l) => !l.hasWebsite) : leads
+   $: extractPercent = extractTotal > 0 ? Math.round((extractDone / extractTotal) * 100) : 0
+ 
+   function resetProgress() {
+@@ -71,6 +75,8 @@
+         requested = response.requested ?? count
+         truncated = Boolean(response.truncated)
+         failedCount = response.failedCount ?? 0
++        wasExpanded = Boolean(response.expanded)
++        queriesUsed = response.queriesUsed ?? []
+       } else {
+         errorMessage = response.error || 'Failed to fetch leads.'
+       }
+@@ -95,7 +101,7 @@
+   }
+ 
+   function exportToCSV() {
+-    if (!leads.length) return
++    if (!visibleLeads.length) return
+ 
+     const header = [
+       'Business Name',
+@@ -111,7 +117,7 @@
+     ]
+     const rows = [
+       header.join(','),
+-      ...leads.map((lead) =>
++      ...visibleLeads.map((lead) =>
+         [
+           `"${lead.name}"`,
+           `"${lead.phone}"`,
+@@ -199,7 +205,8 @@
+           Math.min(500, Math.floor(Number(desiredCount)) || 30)
+         )}
+         unique businesses. If fewer genuinely exist for this search, we'll show everything we found instead
+-        of padding the list.
++        of padding the list. Just a city or town name (no business type) also works — we'll automatically
++        search it across common local business categories for you.
+       </p>
+     </div>
+   </section>
+@@ -229,6 +236,13 @@
+     </div>
+   {/if}
+ 
++  {#if hasSearched && !isScraping && wasExpanded && leads.length > 0}
++    <div class="status-banner">
++      "{query}" looked like just a place name, so we broadened it across {queriesUsed.length}
++      business categories ({queriesUsed.length ? queriesUsed[0] : ''}, …) to find real listings there.
++    </div>
++  {/if}
++
+   {#if hasSearched && !isScraping && leads.length > 0}
+     <section class="stats-grid">
+       <div class="stat-card">
+@@ -333,8 +347,14 @@
+ 
+     <section class="results-card">
+       <div class="results-header">
+-        <h2>All results ({leads.length})</h2>
+-        <button class="export-btn" on:click={exportToCSV}>Export CSV</button>
++        <h2>All results ({visibleLeads.length})</h2>
++        <div class="results-actions">
++          <label class="filter-toggle">
++            <input type="checkbox" bind:checked={onlyNoWebsite} />
++            Only businesses without a website
++          </label>
++          <button class="export-btn" on:click={exportToCSV}>Export CSV</button>
++        </div>
+       </div>
+ 
+       <table class="full-table">
+@@ -351,7 +371,7 @@
+           </tr>
+         </thead>
+         <tbody>
+-          {#each leads as lead (lead.id)}
++          {#each visibleLeads as lead (lead.id)}
+             <tr>
+               <td>
+                 <a class="lead-link" href={lead.mapsUrl} target="_blank" rel="noreferrer"
+@@ -379,6 +399,12 @@
+           {/each}
+         </tbody>
+       </table>
++      {#if visibleLeads.length === 0}
++        <p class="empty-note">
++          No businesses without a website in this batch. Uncheck the filter above to see all
++          {leads.length} results.
++        </p>
++      {/if}
+       {#if failedCount > 0}
+         <p class="failed-note">
+           {failedCount}
+@@ -748,6 +774,29 @@
+     font-size: 1.1rem;
+   }
+ 
++  .results-actions {
++    display: flex;
++    align-items: center;
++    gap: 14px;
++  }
++
++  .filter-toggle {
++    display: flex;
++    align-items: center;
++    gap: 6px;
++    font-size: 0.82rem;
++    font-weight: 600;
++    color: #475569;
++    cursor: pointer;
++    user-select: none;
++  }
++
++  .filter-toggle input {
++    padding: 0;
++    accent-color: #0f766e;
++    cursor: pointer;
++  }
++
+   .export-btn {
+     border: none;
+     border-radius: 10px;
+-- 
+2.43.0
+

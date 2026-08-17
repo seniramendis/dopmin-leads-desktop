@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+scrapling
+curl_cffi
+slowapi
+libsql-client
+playwright

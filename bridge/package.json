@@ -1,0 +1,9 @@
+{
+  "name": "dopmin-leads-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vercel serverless bridge: Svelte UI -> GitHub Actions workflow_dispatch",
+  "engines": {
+    "node": ">=18"
+  }
+}

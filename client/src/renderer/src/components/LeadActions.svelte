@@ -1,0 +1,253 @@
+<script>
+  import DeepProfilePanel from './DeepProfilePanel.svelte'
+
+  export let lead
+
+  let audit = null // last audit result for this lead, if run
+  let auditLoading = false
+  let auditError = ''
+  let showProfileModal = false
+
+  const defaultMessage = () =>
+    lead.hasWebsite
+      ? `Hi ${lead.name}, I took a quick look at your website and spotted a few things costing you customers — want me to send over a free 1-page audit?`
+      : `Hi ${lead.name}, I noticed your business doesn't have a website yet even with your Google reviews — want me to show you what a simple one could do for you?`
+
+  function scoreClass(score) {
+    if (score >= 80) return 'score-good'
+    if (score >= 50) return 'score-mid'
+    return 'score-bad'
+  }
+
+  async function runAudit() {
+    if (!lead.hasWebsite || auditLoading) return
+    auditLoading = true
+    auditError = ''
+    try {
+      const result = await window.api.auditWebsite(lead.website)
+      if (result.success) {
+        audit = result
+      } else {
+        auditError = result.error || 'Audit failed.'
+      }
+    } catch (err) {
+      auditError = err.message || 'Audit failed.'
+    } finally {
+      auditLoading = false
+    }
+  }
+
+  function sendWhatsapp() {
+    window.api.openWhatsapp({ phone: lead.phone, message: defaultMessage() })
+  }
+
+  $: hasPhone = /\d{7,}/.test((lead.phone || '').replace(/[^\d]/g, ''))
+</script>
+
+<div class="actions">
+  <div class="actions-row">
+    {#if lead.hasWebsite}
+      <button
+        class="chip"
+        on:click={runAudit}
+        disabled={auditLoading}
+        title="Run free technical audit"
+      >
+        {#if auditLoading}Auditing…{:else if audit}Re-audit{:else}Audit site{/if}
+      </button>
+      {#if audit}
+        <span class="score-badge {scoreClass(audit.score)}" title={audit.issues?.join(' • ')}>
+          {audit.score}/100
+        </span>
+      {/if}
+
+      <button
+        class="chip chip-ai"
+        on:click={() => (showProfileModal = true)}
+        title="Deep profile + AI Analyst: pricing, tech stack, SWOT, outreach angle"
+      >
+        Deep profile & AI analysis
+      </button>
+    {/if}
+
+    <button
+      class="chip chip-whatsapp"
+      on:click={sendWhatsapp}
+      disabled={!hasPhone}
+      title={hasPhone ? 'Open WhatsApp with a pre-filled message' : 'No usable phone number'}
+    >
+      WhatsApp
+    </button>
+  </div>
+
+  {#if auditError}
+    <p class="inline-error">{auditError}</p>
+  {/if}
+
+  {#if audit && audit.issues?.length}
+    <ul class="issue-list">
+      {#each audit.issues as issue}
+        <li>{issue}</li>
+      {/each}
+    </ul>
+  {/if}
+</div>
+
+{#if showProfileModal}
+  <div class="overlay" role="presentation" on:click={() => (showProfileModal = false)}>
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      on:click|stopPropagation
+      on:keydown|stopPropagation
+    >
+      <div class="modal-header">
+        <h2>{lead.name}</h2>
+        <button class="close-btn" on:click={() => (showProfileModal = false)} aria-label="Close"
+          >✕</button
+        >
+      </div>
+      <DeepProfilePanel
+        url={lead.website}
+        leadName={lead.name}
+        showUrlInput={false}
+        autoRun={true}
+      />
+    </div>
+  </div>
+{/if}
+
+<style>
+  .actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 190px;
+  }
+
+  .actions-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 10px;
+    background: var(--surface);
+    color: var(--text-1);
+    font-size: 0.74rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .chip:hover:not(:disabled) {
+    background: var(--surface-soft);
+    border-color: var(--text-3);
+  }
+
+  .chip:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .chip-whatsapp {
+    background: #e9fbf0;
+    border-color: #bdeccf;
+    color: #16803d;
+  }
+
+  .chip-ai {
+    background: #eef1ff;
+    border-color: #c9cffc;
+    color: #4338ca;
+  }
+
+  .score-badge {
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 999px;
+  }
+
+  .score-good {
+    background: var(--green-soft);
+    color: var(--green-dark);
+  }
+
+  .score-mid {
+    background: var(--yellow-soft);
+    color: var(--yellow-dark);
+  }
+
+  .score-bad {
+    background: var(--red-soft);
+    color: var(--red-dark);
+  }
+
+  .inline-error {
+    font-size: 0.74rem;
+    color: var(--red-dark);
+    margin: 0;
+  }
+
+  .issue-list {
+    margin: 0;
+    padding-left: 16px;
+    font-size: 0.74rem;
+    color: var(--text-2);
+    max-width: 260px;
+  }
+
+  .issue-list li {
+    margin-bottom: 2px;
+  }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 18, 22, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 60;
+    padding: 24px;
+  }
+
+  .modal {
+    background: var(--surface);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    padding: 22px 24px;
+    width: 640px;
+    max-width: 100%;
+    max-height: 85vh;
+    overflow-y: auto;
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+
+  .modal-header h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    color: var(--text-1);
+  }
+
+  .close-btn {
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-3);
+  }
+</style>

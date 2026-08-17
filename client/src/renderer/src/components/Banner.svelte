@@ -1,0 +1,33 @@
+<script>
+  export let variant = 'info' // 'info' | 'error' | 'warning'
+</script>
+
+<div class="banner banner-{variant}">
+  <slot />
+</div>
+
+<style>
+  .banner {
+    padding: 12px 16px;
+    border-radius: var(--radius-sm);
+    font-size: 0.86rem;
+  }
+
+  .banner-info {
+    background: var(--surface-soft);
+    color: var(--text-2);
+    border: 1px solid var(--border);
+  }
+
+  .banner-error {
+    background: var(--red-soft);
+    color: var(--red-dark);
+    border: 1px solid var(--red-soft);
+  }
+
+  .banner-warning {
+    background: var(--yellow-soft);
+    color: var(--yellow-dark);
+    border: 1px solid var(--yellow-soft);
+  }
+</style>
