@@ -10,4 +10,5 @@ out
 .env.local
 .env.*
 *.env
+src/main/embeddedKeys.js
 
