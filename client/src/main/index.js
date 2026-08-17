@@ -144,7 +144,7 @@ function registerIpcHandlers() {
     // its website, or a rating dropping — instead of just a flat list.
     if (result.success && result.leads.length > 0) {
       try {
-        const annotations = upsertLeads(result.leads, query)
+        const annotations = await upsertLeads(result.leads, query)
         result.leads = result.leads.map((lead) => {
           const meta = annotations.get(lead.id)
           return meta
@@ -170,42 +170,42 @@ function registerIpcHandlers() {
 
   // Local Leads Database — the persistent, cross-search dataset. All local
   // SQLite reads/writes, no network calls, no server, $0 at any scale.
-  ipcMain.handle('db-list-leads', (_event, filters) => {
+  ipcMain.handle('db-list-leads', async (_event, filters) => {
     try {
-      return { success: true, leads: listLeads(filters) }
+      return { success: true, leads: await listLeads(filters) }
     } catch (error) {
       return { success: false, error: error.message }
     }
   })
 
-  ipcMain.handle('db-count-leads', (_event, filters) => {
+  ipcMain.handle('db-count-leads', async (_event, filters) => {
     try {
-      return { success: true, count: countLeads(filters) }
+      return { success: true, count: await countLeads(filters) }
     } catch (error) {
       return { success: false, error: error.message }
     }
   })
 
-  ipcMain.handle('db-lead-history', (_event, leadId) => {
+  ipcMain.handle('db-lead-history', async (_event, leadId) => {
     try {
-      return { success: true, history: getLeadHistory(leadId) }
+      return { success: true, history: await getLeadHistory(leadId) }
     } catch (error) {
       return { success: false, error: error.message }
     }
   })
 
-  ipcMain.handle('db-set-status', (_event, { leadId, status }) => {
+  ipcMain.handle('db-set-status', async (_event, { leadId, status }) => {
     try {
-      setLeadStatus(leadId, status)
+      await setLeadStatus(leadId, status)
       return { success: true }
     } catch (error) {
       return { success: false, error: error.message }
     }
   })
 
-  ipcMain.handle('db-stats', () => {
+  ipcMain.handle('db-stats', async () => {
     try {
-      return { success: true, stats: getDbStats() }
+      return { success: true, stats: await getDbStats() }
     } catch (error) {
       return { success: false, error: error.message }
     }
@@ -213,9 +213,9 @@ function registerIpcHandlers() {
 
   // Powers the Dashboard view — KPI cards + charts computed straight from
   // the local leads DB. See getDashboardStats() in db.js for the shape.
-  ipcMain.handle('db-dashboard', () => {
+  ipcMain.handle('db-dashboard', async () => {
     try {
-      return { success: true, stats: getDashboardStats() }
+      return { success: true, stats: await getDashboardStats() }
     } catch (error) {
       return { success: false, error: error.message }
     }

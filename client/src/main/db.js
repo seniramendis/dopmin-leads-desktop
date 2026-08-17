@@ -6,6 +6,7 @@
 import crypto from 'node:crypto'
 import { createClient } from '@libsql/client/web'
 import { LEAD_STATUSES, TRACKED_CHANGE_FIELDS } from './constants'
+import { getCloudConfig } from './cloudConfig'
 
 // Declare db, but DO NOT initialize it yet to prevent boot crashes
 let db = null
@@ -25,15 +26,15 @@ function fingerprint(lead) {
 export async function initDb() {
   if (db) return db // If already connected, skip
 
-  const url = process.env.TURSO_DATABASE_URL || process.env.VITE_TURSO_DATABASE_URL
-  const authToken = process.env.TURSO_AUTH_TOKEN || process.env.VITE_TURSO_AUTH_TOKEN
+  const cfg = getCloudConfig()
+  const url = cfg.tursoUrl
+  const authToken = cfg.tursoToken
 
   if (!url) {
-    console.error('CRITICAL ERROR: Turso URL is missing from environment variables.')
+    console.error('CRITICAL ERROR: Turso URL is missing. Fill in EMBEDDED_CLOUD_CONFIG in cloudConfig.js.')
     return null
   }
 
-  // Initialize the client safely inside the function
   db = createClient({ url, authToken })
 
   await db.executeMultiple(`
@@ -442,14 +443,14 @@ export async function getDashboardStats() {
   )
 
   return {
-    total: totalRes.rows[0].n,
-    noWebsite: noWebsiteRes.rows[0].n,
-    avgRating: avgRatingRes.rows[0].v,
-    byStatus,
-    byCategory: byCategoryRes.rows,
-    byRating,
-    trend,
-    newLast7Days: newLast7DaysRes.rows[0].n,
-    recentChanges: recentChangesRes.rows[0].n
+    total: Number(totalRes.rows[0].n),
+    noWebsite: Number(noWebsiteRes.rows[0].n),
+    avgRating: avgRatingRes.rows[0].v != null ? Number(avgRatingRes.rows[0].v) : null,
+    byStatus: byStatus.map((r) => ({ status: r.status, n: Number(r.n) })),
+    byCategory: byCategoryRes.rows.map((r) => ({ category: r.category, n: Number(r.n) })),
+    byRating: byRating.map((r) => ({ bucket: r.bucket, n: Number(r.n) })),
+    trend: trend.map((r) => ({ day: r.day, n: Number(r.n) })),
+    newLast7Days: Number(newLast7DaysRes.rows[0].n),
+    recentChanges: Number(recentChangesRes.rows[0].n)
   }
 }
