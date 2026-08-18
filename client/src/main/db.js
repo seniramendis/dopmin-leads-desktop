@@ -1,9 +1,17 @@
 // src/main/db.js
 //
-// Local SQLite implementation (better-sqlite3). This is the leads DB that
-// powers the Results table, Lead History, and the Dashboard — it lives on
-// disk in the app's userData folder and needs zero setup or external
-// accounts, so the app works fully offline out of the box.
+// Local SQLite implementation using sql.js — a pure WebAssembly build of
+// SQLite. Deliberately chosen over better-sqlite3: better-sqlite3 is a
+// native C++ addon that must be compiled per-machine (needs Visual Studio
+// Build Tools on Windows, Xcode CLT on Mac, build-essential on Linux),
+// which is exactly the kind of setup friction this app should not require
+// from a customer install. sql.js has zero native dependencies — it just
+// works everywhere Node.js runs.
+//
+// Trade-off: sql.js keeps the whole database in memory and we explicitly
+// persist it to disk (as a single binary file) after each write. That's
+// perfectly fine at this app's scale (a local leads list, not a
+// high-write server database).
 //
 // NOTE: this is separate from src/main/cloudBridge.js, which is an
 // *optional* feature (triggering a remote GitHub Actions scrape via a
@@ -14,12 +22,17 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import { app } from 'electron'
-import Database from 'better-sqlite3'
+import initSqlJs from 'sql.js'
 import { LEAD_STATUSES, TRACKED_CHANGE_FIELDS } from './constants'
 
-// Lazy-load database to prevent Electron boot crashes
+const require = createRequire(import.meta.url)
+
+// Lazy-loaded singletons
 let db = null
+let dbPath = null
+let SQL = null
 
 /** Normalizes name+address into a stable id */
 function fingerprint(lead) {
@@ -33,20 +46,6 @@ function fingerprint(lead) {
   return crypto.createHash('sha1').update(key).digest('hex')
 }
 
-// Kept for shape-compatibility with callers that expect plain JS values
-// (better-sqlite3 already returns plain numbers/strings, but this keeps
-// the "clean object, no surprises over IPC" guarantee explicit).
-function serializeRows(rows) {
-  if (!rows) return []
-  return rows.map((row) => {
-    const clean = {}
-    for (const [key, value] of Object.entries(row)) {
-      clean[key] = typeof value === 'bigint' ? Number(value) : value
-    }
-    return clean
-  })
-}
-
 function resolveDbPath() {
   // app.getPath is only available once Electron's app is ready; by the
   // time any IPC handler calls initDb() that's already true. Fall back to
@@ -55,19 +54,62 @@ function resolveDbPath() {
   if (!fs.existsSync(userDataDir)) {
     fs.mkdirSync(userDataDir, { recursive: true })
   }
-  return path.join(userDataDir, 'dopmin-leads.db')
+  return path.join(userDataDir, 'dopmin-leads.sqlite')
+}
+
+/** Writes the current in-memory database to disk. Call after any write. */
+function persist() {
+  if (!db || !dbPath) return
+  const data = db.export()
+  fs.writeFileSync(dbPath, Buffer.from(data))
+}
+
+// --- Thin query helpers over sql.js's statement API -----------------------
+
+function run(sql, params = []) {
+  db.run(sql, params)
+}
+
+function get(sql, params = []) {
+  const stmt = db.prepare(sql)
+  try {
+    stmt.bind(params)
+    if (stmt.step()) return stmt.getAsObject()
+    return null
+  } finally {
+    stmt.free()
+  }
+}
+
+function all(sql, params = []) {
+  const stmt = db.prepare(sql)
+  const rows = []
+  try {
+    stmt.bind(params)
+    while (stmt.step()) rows.push(stmt.getAsObject())
+    return rows
+  } finally {
+    stmt.free()
+  }
 }
 
 export async function initDb() {
   if (db) return db // If already connected, skip
 
-  const dbPath = resolveDbPath()
-  db = new Database(dbPath)
-  db.pragma('journal_mode = WAL')
-  db.pragma('foreign_keys = ON')
+  if (!SQL) {
+    const wasmPath = require.resolve('sql.js/dist/sql-wasm.wasm')
+    SQL = await initSqlJs({ locateFile: () => wasmPath })
+  }
 
-  // 1. Build Tables
-  db.exec(`
+  dbPath = resolveDbPath()
+  const existing = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : null
+  db = existing ? new SQL.Database(existing) : new SQL.Database()
+
+  // 1. Build tables (search uses plain LIKE queries below rather than
+  // FTS5, since FTS5 support varies across sql.js builds — LIKE is
+  // guaranteed to work everywhere and this dataset is small enough that
+  // it costs nothing in practice).
+  db.run(`
     CREATE TABLE IF NOT EXISTS leads (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -100,10 +142,6 @@ export async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_history_lead ON lead_history(lead_id);
     CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
 
-    CREATE VIRTUAL TABLE IF NOT EXISTS leads_fts USING fts5(
-      id UNINDEXED, name, category, address, content=''
-    );
-
     CREATE TABLE IF NOT EXISTS analysis_cache (
       cache_key TEXT PRIMARY KEY,
       payload TEXT NOT NULL,
@@ -114,10 +152,12 @@ export async function initDb() {
   // 2. The 30-Day Auto-Purge. Cleans up any leads older than 30 days every
   // time the database boots.
   try {
-    db.prepare(`DELETE FROM leads WHERE first_seen_at < datetime('now', '-30 days')`).run()
+    run(`DELETE FROM leads WHERE first_seen_at < datetime('now', '-30 days')`)
   } catch (err) {
     console.error('Failed to execute 30-day purge:', err)
   }
+
+  persist()
 
   return db
 }
@@ -129,89 +169,93 @@ export async function upsertLeads(leads, queryUsed) {
   const now = new Date().toISOString()
   const annotations = new Map()
 
-  const getExisting = database.prepare(`SELECT * FROM leads WHERE id = ?`)
-  const insertLead = database.prepare(`
-    INSERT INTO leads
-      (id, name, category, phone, address, maps_url, rating, review_count, has_website, website, reputation, status, query_used, first_seen_at, last_seen_at, times_seen)
-    VALUES (@id, @name, @category, @phone, @address, @mapsUrl, @rating, @reviewCount, @hasWebsite, @website, @reputation, 'new', @queryUsed, @now, @now, 1)
-  `)
-  const updateLead = database.prepare(`
-    UPDATE leads SET
-      category = @category, phone = @phone, address = @address, maps_url = @mapsUrl,
-      rating = @rating, review_count = @reviewCount, has_website = @hasWebsite,
-      website = @website, reputation = @reputation, query_used = @queryUsed,
-      last_seen_at = @now, times_seen = times_seen + 1
-    WHERE id = @id
-  `)
-  const deleteFts = database.prepare(`DELETE FROM leads_fts WHERE id = ?`)
-  const insertFts = database.prepare(
-    `INSERT INTO leads_fts (id, name, category, address) VALUES (?, ?, ?, ?)`
-  )
-  const insertHistory = database.prepare(`
-    INSERT INTO lead_history (lead_id, changed_at, field, old_value, new_value)
-    VALUES (?, ?, ?, ?, ?)
-  `)
+  for (const lead of leads) {
+    const id = fingerprint(lead)
+    const existing = get(`SELECT * FROM leads WHERE id = ?`, [id])
 
-  const run = database.transaction((leadsToProcess) => {
-    for (const lead of leadsToProcess) {
-      const id = fingerprint(lead)
-      const existing = getExisting.get(id)
+    const name = lead.name || 'Unnamed business'
+    const category = lead.category || ''
+    const phone = lead.phone || ''
+    const address = lead.address || ''
+    const mapsUrl = lead.mapsUrl || ''
+    const rating = lead.rating ?? null
+    const reviewCount = lead.reviewCount ?? 0
+    const hasWebsite = lead.hasWebsite ? 1 : 0
+    const website = lead.website || ''
+    const reputation = lead.reputation || 'unrated'
 
-      const params = {
-        id,
-        name: lead.name || 'Unnamed business',
-        category: lead.category || '',
-        phone: lead.phone || '',
-        address: lead.address || '',
-        mapsUrl: lead.mapsUrl || '',
-        rating: lead.rating ?? null,
-        reviewCount: lead.reviewCount ?? 0,
-        hasWebsite: lead.hasWebsite ? 1 : 0,
-        website: lead.website || '',
-        reputation: lead.reputation || 'unrated',
-        queryUsed: queryUsed || '',
-        now
-      }
+    if (!existing) {
+      run(
+        `INSERT INTO leads
+          (id, name, category, phone, address, maps_url, rating, review_count, has_website, website, reputation, status, query_used, first_seen_at, last_seen_at, times_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, 1)`,
+        [
+          id,
+          name,
+          category,
+          phone,
+          address,
+          mapsUrl,
+          rating,
+          reviewCount,
+          hasWebsite,
+          website,
+          reputation,
+          queryUsed || '',
+          now,
+          now
+        ]
+      )
 
-      if (!existing) {
-        insertLead.run(params)
-        deleteFts.run(id)
-        insertFts.run(id, params.name, params.category, params.address)
-
-        annotations.set(lead.id, { dbId: id, isNew: true, changes: [], status: 'new' })
-        continue
-      }
-
-      const changes = []
-      const existingSnapshot = {
-        hasWebsite: !!existing.has_website,
-        rating: existing.rating,
-        reviewCount: existing.review_count,
-        website: existing.website
-      }
-
-      for (const field of TRACKED_CHANGE_FIELDS) {
-        const oldVal = existingSnapshot[field]
-        const newVal = field === 'hasWebsite' ? !!lead.hasWebsite : lead[field]
-        if (oldVal !== newVal && !(oldVal == null && newVal == null)) {
-          changes.push({ field, oldVal, newVal })
-          insertHistory.run(id, now, field, String(oldVal ?? ''), String(newVal ?? ''))
-        }
-      }
-
-      params.queryUsed = queryUsed || existing.query_used
-
-      updateLead.run(params)
-      deleteFts.run(id)
-      insertFts.run(id, params.name, params.category, params.address)
-
-      annotations.set(lead.id, { dbId: id, isNew: false, changes, status: existing.status })
+      annotations.set(lead.id, { dbId: id, isNew: true, changes: [], status: 'new' })
+      continue
     }
-  })
 
-  run(leads)
+    const changes = []
+    const existingSnapshot = {
+      hasWebsite: !!existing.has_website,
+      rating: existing.rating,
+      reviewCount: existing.review_count,
+      website: existing.website
+    }
+
+    for (const field of TRACKED_CHANGE_FIELDS) {
+      const oldVal = existingSnapshot[field]
+      const newVal = field === 'hasWebsite' ? !!lead.hasWebsite : lead[field]
+      if (oldVal !== newVal && !(oldVal == null && newVal == null)) {
+        changes.push({ field, oldVal, newVal })
+        run(
+          `INSERT INTO lead_history (lead_id, changed_at, field, old_value, new_value) VALUES (?, ?, ?, ?, ?)`,
+          [id, now, field, String(oldVal ?? ''), String(newVal ?? '')]
+        )
+      }
+    }
+
+    const queryUsedFinal = queryUsed || existing.query_used
+
+    run(
+      `UPDATE leads SET
+        category = ?, phone = ?, address = ?, maps_url = ?,
+        rating = ?, review_count = ?, has_website = ?,
+        website = ?, reputation = ?, query_used = ?,
+        last_seen_at = ?, times_seen = times_seen + 1
+        WHERE id = ?`,
+      [category, phone, address, mapsUrl, rating, reviewCount, hasWebsite, website, reputation, queryUsedFinal, now, id]
+    )
+
+    annotations.set(lead.id, { dbId: id, isNew: false, changes, status: existing.status })
+  }
+
+  persist()
 
   return annotations
+}
+
+function buildSearchClause(search, args) {
+  if (!search || !search.trim()) return ''
+  const like = `%${search.trim()}%`
+  args.push(like, like, like)
+  return '(name LIKE ? OR category LIKE ? OR address LIKE ?)'
 }
 
 export async function countLeads(filters = {}) {
@@ -221,6 +265,9 @@ export async function countLeads(filters = {}) {
   const { status, hasWebsite, minRating, search } = filters
   const clauses = []
   const args = []
+
+  const searchClause = buildSearchClause(search, args)
+  if (searchClause) clauses.push(searchClause)
 
   if (status) {
     clauses.push('status = ?')
@@ -235,20 +282,8 @@ export async function countLeads(filters = {}) {
     args.push(minRating)
   }
 
-  let sql
-  if (search && search.trim()) {
-    sql = `
-      SELECT COUNT(*) AS n FROM leads
-      JOIN leads_fts ON leads.id = leads_fts.id
-      WHERE leads_fts MATCH ?
-      ${clauses.length ? 'AND ' + clauses.join(' AND ') : ''}
-    `
-    args.unshift(`${search.trim()}*`)
-  } else {
-    sql = `SELECT COUNT(*) AS n FROM leads ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}`
-  }
-
-  const row = database.prepare(sql).get(...args)
+  const sql = `SELECT COUNT(*) AS n FROM leads ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}`
+  const row = get(sql, args)
   return Number(row.n)
 }
 
@@ -266,6 +301,9 @@ export async function listLeads({
   const clauses = []
   const args = []
 
+  const searchClause = buildSearchClause(search, args)
+  if (searchClause) clauses.push(searchClause)
+
   if (status) {
     clauses.push('status = ?')
     args.push(status)
@@ -279,39 +317,22 @@ export async function listLeads({
     args.push(minRating)
   }
 
-  let sql
-  if (search && search.trim()) {
-    sql = `
-      SELECT leads.* FROM leads
-      JOIN leads_fts ON leads.id = leads_fts.id
-      WHERE leads_fts MATCH ?
-      ${clauses.length ? 'AND ' + clauses.join(' AND ') : ''}
-      ORDER BY last_seen_at DESC
-      LIMIT ? OFFSET ?
-    `
-    args.unshift(`${search.trim()}*`)
-  } else {
-    sql = `
-      SELECT * FROM leads
-      ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}
-      ORDER BY last_seen_at DESC
-      LIMIT ? OFFSET ?
-    `
-  }
+  const sql = `
+    SELECT * FROM leads
+    ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}
+    ORDER BY last_seen_at DESC
+    LIMIT ? OFFSET ?
+  `
   args.push(limit, offset)
 
-  const rows = database.prepare(sql).all(...args)
-  return serializeRows(rows)
+  return all(sql, args)
 }
 
 export async function getLeadHistory(leadId) {
   const database = await initDb()
   if (!database) return []
 
-  const rows = database
-    .prepare(`SELECT * FROM lead_history WHERE lead_id = ? ORDER BY changed_at DESC`)
-    .all(leadId)
-  return serializeRows(rows)
+  return all(`SELECT * FROM lead_history WHERE lead_id = ? ORDER BY changed_at DESC`, [leadId])
 }
 
 export async function setLeadStatus(leadId, status) {
@@ -321,16 +342,17 @@ export async function setLeadStatus(leadId, status) {
   if (!LEAD_STATUSES.includes(status)) {
     throw new Error(`Invalid status "${status}". Must be one of: ${LEAD_STATUSES.join(', ')}`)
   }
-  database.prepare(`UPDATE leads SET status = ? WHERE id = ?`).run(status, leadId)
+  run(`UPDATE leads SET status = ? WHERE id = ?`, [status, leadId])
+  persist()
 }
 
 export async function getCachedAnalysis(cacheKey) {
   const database = await initDb()
   if (!database) return null
 
-  const row = database
-    .prepare('SELECT payload, created_at FROM analysis_cache WHERE cache_key = ?')
-    .get(cacheKey)
+  const row = get('SELECT payload, created_at FROM analysis_cache WHERE cache_key = ?', [
+    cacheKey
+  ])
   if (!row) return null
 
   try {
@@ -347,31 +369,29 @@ export async function setCachedAnalysis(cacheKey, value) {
   const now = new Date().toISOString()
   const payload = JSON.stringify(value)
 
-  database
-    .prepare(
-      `INSERT INTO analysis_cache (cache_key, payload, created_at) VALUES (?, ?, ?)
-       ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at`
-    )
-    .run(cacheKey, payload, now)
+  run(
+    `INSERT INTO analysis_cache (cache_key, payload, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at`,
+    [cacheKey, payload, now]
+  )
+  persist()
 }
 
 export async function getDbStats() {
   const database = await initDb()
   if (!database) return { total: 0, noWebsite: 0, byStatus: [], recentChanges: 0 }
 
-  const total = database.prepare(`SELECT COUNT(*) AS n FROM leads`).get()
-  const noWebsite = database.prepare(`SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`).get()
-  const byStatusRows = database
-    .prepare(`SELECT status, COUNT(*) AS n FROM leads GROUP BY status`)
-    .all()
-  const recentChanges = database
-    .prepare(`SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`)
-    .get()
+  const total = get(`SELECT COUNT(*) AS n FROM leads`)
+  const noWebsite = get(`SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`)
+  const byStatusRows = all(`SELECT status, COUNT(*) AS n FROM leads GROUP BY status`)
+  const recentChanges = get(
+    `SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`
+  )
 
   return {
     total: Number(total.n),
     noWebsite: Number(noWebsite.n),
-    byStatus: serializeRows(byStatusRows),
+    byStatus: byStatusRows,
     recentChanges: Number(recentChanges.n)
   }
 }
@@ -400,60 +420,41 @@ export async function getDashboardStats() {
     }
   }
 
-  const total = database.prepare(`SELECT COUNT(*) AS n FROM leads`).get()
-  const noWebsite = database.prepare(`SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`).get()
-  const avgRatingRow = database
-    .prepare(`SELECT AVG(rating) AS v FROM leads WHERE rating IS NOT NULL`)
-    .get()
+  const total = get(`SELECT COUNT(*) AS n FROM leads`)
+  const noWebsite = get(`SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`)
+  const avgRatingRow = get(`SELECT AVG(rating) AS v FROM leads WHERE rating IS NOT NULL`)
 
-  const byStatusRows = database
-    .prepare(`SELECT status, COUNT(*) AS n FROM leads GROUP BY status`)
-    .all()
-  const byStatus = withZeroFilledCounts(serializeRows(byStatusRows), LEAD_STATUSES, 'status')
+  const byStatusRows = all(`SELECT status, COUNT(*) AS n FROM leads GROUP BY status`)
+  const byStatus = withZeroFilledCounts(byStatusRows, LEAD_STATUSES, 'status')
 
-  const byCategory = serializeRows(
-    database
-      .prepare(
-        `
-        SELECT category, COUNT(*) AS n FROM leads
-        WHERE category IS NOT NULL AND TRIM(category) != ''
-        GROUP BY category ORDER BY n DESC LIMIT 6
-        `
-      )
-      .all()
-  )
+  const byCategory = all(`
+    SELECT category, COUNT(*) AS n FROM leads
+    WHERE category IS NOT NULL AND TRIM(category) != ''
+    GROUP BY category ORDER BY n DESC LIMIT 6
+  `)
 
-  const ratingRows = database
-    .prepare(
-      `
-      SELECT
-        CASE
-          WHEN rating IS NULL THEN 'Unrated'
-          WHEN rating >= 4.5 THEN '4.5★+'
-          WHEN rating >= 4.0 THEN '4.0–4.4★'
-          WHEN rating >= 3.0 THEN '3.0–3.9★'
-          ELSE 'Under 3★'
-        END AS bucket,
-        COUNT(*) AS n
-      FROM leads GROUP BY bucket
-      `
-    )
-    .all()
-  const byRating = withZeroFilledCounts(serializeRows(ratingRows), RATING_BUCKET_ORDER, 'bucket')
+  const ratingRows = all(`
+    SELECT
+      CASE
+        WHEN rating IS NULL THEN 'Unrated'
+        WHEN rating >= 4.5 THEN '4.5★+'
+        WHEN rating >= 4.0 THEN '4.0–4.4★'
+        WHEN rating >= 3.0 THEN '3.0–3.9★'
+        ELSE 'Under 3★'
+      END AS bucket,
+      COUNT(*) AS n
+    FROM leads GROUP BY bucket
+  `)
+  const byRating = withZeroFilledCounts(ratingRows, RATING_BUCKET_ORDER, 'bucket')
 
-  const trendRows = database
-    .prepare(
-      `
-      SELECT substr(first_seen_at, 1, 10) AS day, COUNT(*) AS n
-      FROM leads
-      WHERE first_seen_at >= datetime('now', '-14 days')
-      GROUP BY day
-      `
-    )
-    .all()
+  const trendRows = all(`
+    SELECT substr(first_seen_at, 1, 10) AS day, COUNT(*) AS n
+    FROM leads
+    WHERE first_seen_at >= datetime('now', '-14 days')
+    GROUP BY day
+  `)
 
-  const serializedTrendRows = serializeRows(trendRows)
-  const trendByDay = new Map(serializedTrendRows.map((r) => [r.day, r.n]))
+  const trendByDay = new Map(trendRows.map((r) => [r.day, r.n]))
   const now = Date.now()
   const dayMs = 24 * 60 * 60 * 1000
   const trend = Array.from({ length: 14 }, (_, i) => {
@@ -461,12 +462,12 @@ export async function getDashboardStats() {
     return { day, n: trendByDay.get(day) || 0 }
   })
 
-  const newLast7Days = database
-    .prepare(`SELECT COUNT(*) AS n FROM leads WHERE first_seen_at >= datetime('now', '-7 days')`)
-    .get()
-  const recentChanges = database
-    .prepare(`SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`)
-    .get()
+  const newLast7Days = get(
+    `SELECT COUNT(*) AS n FROM leads WHERE first_seen_at >= datetime('now', '-7 days')`
+  )
+  const recentChanges = get(
+    `SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`
+  )
 
   return {
     total: Number(total.n),
