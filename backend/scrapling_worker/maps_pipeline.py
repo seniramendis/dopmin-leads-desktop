@@ -48,8 +48,8 @@ from constants import (
 )
 from netutil import (
     NetworkHealth,
-    check_internet_connection,
     is_network_error,
+    measure_connection_quality,
 )
 from query_expansion import expand_query, broaden_query
 
@@ -57,6 +57,27 @@ BLOCKED_RE = re.compile(r"unusual traffic|automated queries|our systems have det
 RATING_RE = re.compile(r"([\d.]+)\s*star", re.I)
 REVIEWS_RE = re.compile(r"([\d,]+)\s*review", re.I)
 OPEN_STATUS_RE = re.compile(r"^(open|closed|opens|closes)\b", re.I)
+
+# Google embeds a stable per-place hex ID (CID) in every place URL's `data=`
+# blob, e.g. "!1s0x3ae2530...:0x8f1c...". Different sub-queries surface the
+# *same* business behind *different* href query strings/viewport params, so
+# deduping on the raw href (the old behavior) let duplicates through — each
+# one costing a full extra detail-page fetch. Deduping on this ID instead
+# catches those overlaps before phase 2 even starts.
+PLACE_ID_RE = re.compile(r"!1s(0x[0-9a-f]+:0x[0-9a-f]+)", re.I)
+
+
+def canonical_place_key(href):
+    """Best-effort stable key for a place URL, for de-duplication only —
+    navigation always uses the original href."""
+    match = PLACE_ID_RE.search(href or "")
+    if match:
+        return match.group(1)
+    try:
+        parsed = urlparse(href)
+        return parsed.path  # fallback: drop query/viewport noise at least
+    except Exception:
+        return href
 
 
 class RateLimitedError(Exception):
@@ -118,7 +139,7 @@ async def _dismiss_consent(page):
             continue
 
 
-async def _discovery_action(page, state, desired, on_progress):
+async def _discovery_action(page, state, desired, on_progress, shared=None, global_desired=None):
     """Scrolls the Google Maps results feed until we have `desired` unique
     place URLs, Google's own "end of the list" marker appears, or the feed
     stops growing for several rounds in a row. Uses both a real wheel event
@@ -134,13 +155,19 @@ async def _discovery_action(page, state, desired, on_progress):
         return
 
     await _dismiss_consent(page)
-    await page.wait_for_timeout(1500)
+    await page.wait_for_timeout(1000)
 
     previous_count = 0
     stagnant_rounds = 0
     max_rounds = min(120, desired // 3 + 21)
 
     for _ in range(max_rounds):
+        # Other concurrently-running sub-queries may have already filled the
+        # global target while this one was still scrolling — bail out early
+        # instead of grinding through more lazy-load rounds nobody needs.
+        if shared is not None and global_desired is not None and len(shared["listings"]) >= global_desired:
+            break
+
         try:
             feed_box = await page.query_selector('div[role="feed"]')
             if feed_box:
@@ -188,7 +215,7 @@ async def _discovery_action(page, state, desired, on_progress):
         # With resources disabled the feed re-renders much faster, so a
         # short jittered wait keeps the scroll loop safe from bot detection
         # without long idle stretches.
-        await asyncio.sleep(random.uniform(0.5, 0.8))
+        await asyncio.sleep(random.uniform(0.3, 0.5))
 
 
 async def _consent_only_action(page, _state, _desired, _on_progress):
@@ -203,6 +230,7 @@ async def _consent_only_action(page, _state, _desired, _on_progress):
 async def _run_sub_query(session, sub_query, index, total, desired, shared, on_progress, health):
     if len(shared["listings"]) >= desired or shared["rate_limited"] or health.aborted:
         return
+    global_desired = desired
 
     shared["launched"] += 1
     search_url = f"https://www.google.com/maps/search/{quote(sub_query)}?hl=en"
@@ -223,7 +251,9 @@ async def _run_sub_query(session, sub_query, index, total, desired, shared, on_p
     remaining = max(1, desired - len(shared["listings"]))
 
     async def action(page):
-        await _discovery_action(page, state, remaining, on_progress)
+        await _discovery_action(
+            page, state, remaining, on_progress, shared=shared, global_desired=global_desired
+        )
 
     try:
         nav_start = time.monotonic()
@@ -232,7 +262,7 @@ async def _run_sub_query(session, sub_query, index, total, desired, shared, on_p
             page_action=action,
             timeout=60000,
             network_idle=False,
-            wait=500,
+            wait=300,
         )
         health.record_success((time.monotonic() - nav_start) * 1000)
     except Exception as error:
@@ -249,21 +279,27 @@ async def _run_sub_query(session, sub_query, index, total, desired, shared, on_p
     # Parse the result cards straight off Scrapling's Response — the feed is
     # fully scrolled by the time page_action returns, so every loaded anchor
     # is present in the final DOM snapshot.
+    # `listings` is now a dict keyed by the canonical place ID (see
+    # canonical_place_key above) instead of a list plus a separate `seen`
+    # set — one lookup instead of two, and the key itself *is* the
+    # de-dup check, so there's no way for them to drift out of sync.
     for anchor in page.css('a[href*="/maps/place/"]'):
         href = anchor.attrib.get("href")
-        if not href or href in shared["seen"]:
+        if not href:
             continue
-        shared["seen"].add(href)
-        shared["listings"].append({"href": href, "quickName": anchor.attrib.get("aria-label", "")})
+        key = canonical_place_key(href)
+        if key in shared["listings"]:
+            continue
+        shared["listings"][key] = {"href": href, "quickName": anchor.attrib.get("aria-label", "")}
 
 
 async def discover_listings(session, sub_queries, desired, on_progress, health, shared=None):
-    """Runs discovery across every sub-query, deduping by href, stopping as
-    soon as `desired` unique listings are found (or every sub-query ran)."""
+    """Runs discovery across every sub-query, deduping by canonical place
+    key, stopping as soon as `desired` unique listings are found (or every
+    sub-query ran)."""
     if shared is None:
         shared = {
-            "listings": [],
-            "seen": set(),
+            "listings": {},
             "rate_limited": False,
             "launched": 0,
             "is_expanded": len(sub_queries) > 1,
@@ -387,7 +423,7 @@ async def extract_detail(session, listing, health, counters):
                 wait_selector="h1",
                 timeout=NAV_TIMEOUT_MS,
                 network_idle=False,
-                wait=500,
+                wait=250,
             )
             health.record_success((time.monotonic() - nav_start) * 1000)
 
@@ -416,7 +452,7 @@ async def extract_detail(session, listing, health, counters):
             if health.aborted:
                 break
             if attempt <= MAX_DETAIL_RETRIES:
-                await asyncio.sleep(random.uniform(0.7, 1.3))
+                await asyncio.sleep(random.uniform(0.4, 0.8))
 
     return {
         "success": False,
@@ -449,7 +485,7 @@ async def run_detail_pool(session, listings, on_progress, health):
                     "retries": counters["retries"],
                 }
             )
-            await asyncio.sleep(random.uniform(0.08, 0.2))
+            await asyncio.sleep(random.uniform(0.05, 0.12))
             return result
 
     return await asyncio.gather(*(worker(listing) for listing in listings))
@@ -495,14 +531,24 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
     sub_queries = expand_query(query, options.get("mode", ""))
 
     # Fail fast with no connection instead of watching every navigation
-    # time out one by one.
+    # time out one by one — and actually measure latency instead of just
+    # confirming DNS resolves, so "your connection looks slow" (if it shows
+    # up later) is backed by a real number instead of a guess.
     on_progress({"phase": "searching", "message": "Checking your internet connection…"})
-    if not await check_internet_connection():
+    connection = await measure_connection_quality()
+    if not connection["reachable"]:
         return {
             "success": False,
             "error": "No internet connection detected. Please check your connection and try again.",
             "errorType": "offline",
         }
+    if connection["quality"] == "poor":
+        on_progress(
+            {
+                "phase": "connection-slow",
+                "message": f"Connection to Google is slow ({connection['latency_ms']:.0f}ms) — this search may take longer than usual.",
+            }
+        )
 
     health = NetworkHealth(
         on_progress=on_progress,
@@ -525,7 +571,7 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
             timeout=NAV_TIMEOUT_MS,
         ) as session:
             shared = await discover_listings(session, sub_queries, desired, on_progress, health)
-            listings = shared["listings"]
+            listings = list(shared["listings"].values())
             is_expanded = shared["is_expanded"]
             rate_limited = shared["rate_limited"]
 
@@ -547,7 +593,7 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
                     shared = await discover_listings(
                         session, broader_queries, desired, on_progress, health, shared=shared
                     )
-                    listings = shared["listings"]
+                    listings = list(shared["listings"].values())
                     is_expanded = True
                     queries_used = sub_queries + broader_queries
 

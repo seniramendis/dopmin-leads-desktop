@@ -2,6 +2,8 @@
 list the scraping pipeline needs, now living next to the Python workers so
 they can be tweaked (or unit tested) without touching scraping logic."""
 
+import os
+
 # Rating thresholds used to classify a lead's reputation from its Google
 # Maps star rating (powers the High-Value Leads vs Reputation Rescue split).
 REPUTATION_THRESHOLDS = {
@@ -10,13 +12,36 @@ REPUTATION_THRESHOLDS = {
     "average": 3.0,
 }
 
+
+def _cpu_scaled(per_core, floor, ceiling, env_var):
+    """Scale a concurrency knob to the machine's core count instead of a
+    fixed constant. A flat "14 parallel browser tabs" number is fine on an
+    8-core desktop and genuinely overloads a 2-core laptop — every tab then
+    contends for the same CPU, navigations get slow for real, and that
+    shows up as false "slow internet" warnings even though the connection
+    itself is fine. `DOPMIN_DETAIL_CONCURRENCY` / `DOPMIN_DISCOVERY_CONCURRENCY`
+    env vars still win outright if you want to force a specific number."""
+    override = os.environ.get(env_var)
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
+    cores = os.cpu_count() or 4
+    return max(floor, min(ceiling, round(cores * per_core)))
+
+
 # How many place detail pages we read at once. Scrapling's AsyncStealthySession
 # page pool is created with this size; disable_resources=True keeps each tab's
-# CPU/RAM footprint low enough to support this many parallel pages safely.
-DETAIL_CONCURRENCY = 10
+# CPU/RAM footprint low enough to support several in parallel, but it's still
+# a real Chromium process per tab — scaled to cores, not a flat number, so it
+# doesn't overrun weaker machines. Override with DOPMIN_DETAIL_CONCURRENCY.
+DETAIL_CONCURRENCY = _cpu_scaled(per_core=2.5, floor=4, ceiling=14, env_var="DOPMIN_DETAIL_CONCURRENCY")
 
-# How many category sub-queries run at once during discovery.
-DISCOVERY_CONCURRENCY = 3
+# How many category sub-queries run at once during discovery. Kept at or
+# below DETAIL_CONCURRENCY since both draw from the same browser page pool.
+# Override with DOPMIN_DISCOVERY_CONCURRENCY.
+DISCOVERY_CONCURRENCY = _cpu_scaled(per_core=1.5, floor=2, ceiling=8, env_var="DOPMIN_DISCOVERY_CONCURRENCY")
 
 # Retries per listing if a detail page fails to load or times out.
 MAX_DETAIL_RETRIES = 2
@@ -218,4 +243,23 @@ DEFAULT_CATEGORY_EXPANSION = [
     "banks", "real estate agents", "property management companies",
     # Education
     "schools", "preschools", "tutoring centers", "driving schools",
+]
+
+# Discovery runs DEFAULT_CATEGORY_EXPANSION roughly in order and stops fanning
+# out further sub-queries once `desired` unique listings are found (see
+# discover_listings in maps_pipeline.py). That means order matters for speed:
+# categories that reliably return dense result feeds should run first so the
+# target count is hit — and remaining sub-queries skipped — sooner. This is
+# a fixed, hand-tuned priority order based on typical Google Maps listing
+# density per category, not a per-search ranking (there's no signal yet to
+# personalize it further).
+_HIGH_YIELD_CATEGORIES_FIRST = [
+    "restaurants", "shops", "cafes", "supermarkets", "salons", "clinics",
+    "pharmacies", "hotels", "clothing stores", "hardware stores", "banks",
+    "auto repair shops", "gyms", "real estate agents", "grocery stores",
+    "bars", "schools", "electronics stores", "barbershops", "dental clinics",
+]
+DEFAULT_CATEGORY_EXPANSION = _HIGH_YIELD_CATEGORIES_FIRST + [
+    category for category in DEFAULT_CATEGORY_EXPANSION
+    if category not in _HIGH_YIELD_CATEGORIES_FIRST
 ]
