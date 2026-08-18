@@ -2,13 +2,11 @@
 //
 // 100% Serverless/Cloud implementation using Turso (libSQL).
 // Bypasses all local C++ compiler requirements by using the pure HTTP /web client.
-// Uses lazy-loading to ensure environment variables are read safely.
 import crypto from 'node:crypto'
 import { createClient } from '@libsql/client/web'
 import { LEAD_STATUSES, TRACKED_CHANGE_FIELDS } from './constants'
-import { getCloudConfig } from './cloudConfig'
 
-// Declare db, but DO NOT initialize it yet to prevent boot crashes
+// Lazy-load database to prevent Electron boot crashes
 let db = null
 
 /** Normalizes name+address into a stable id */
@@ -23,20 +21,34 @@ function fingerprint(lead) {
   return crypto.createHash('sha1').update(key).digest('hex')
 }
 
+// Helper to safely serialize Turso rows for Electron IPC
+// Strips custom prototypes and converts BigInts to standard Numbers
+function serializeRows(rows) {
+  if (!rows) return []
+  return rows.map((row) => {
+    const clean = {}
+    for (const [key, value] of Object.entries(row)) {
+      clean[key] = typeof value === 'bigint' ? Number(value) : value
+    }
+    return clean
+  })
+}
+
 export async function initDb() {
   if (db) return db // If already connected, skip
 
-  const cfg = getCloudConfig()
-  const url = cfg.tursoUrl
-  const authToken = cfg.tursoToken
+  const url = process.env.TURSO_DATABASE_URL || process.env.VITE_TURSO_DATABASE_URL
+  const authToken = process.env.TURSO_AUTH_TOKEN || process.env.VITE_TURSO_AUTH_TOKEN
 
   if (!url) {
-    console.error('CRITICAL ERROR: Turso URL is missing. Fill in EMBEDDED_CLOUD_CONFIG in cloudConfig.js.')
+    console.error('CRITICAL ERROR: Turso URL is missing from environment variables.')
     return null
   }
 
+  // Initialize the client safely
   db = createClient({ url, authToken })
 
+  // 1. Build Tables
   await db.executeMultiple(`
     CREATE TABLE IF NOT EXISTS leads (
       id TEXT PRIMARY KEY,
@@ -64,7 +76,7 @@ export async function initDb() {
       field TEXT NOT NULL,
       old_value TEXT,
       new_value TEXT,
-      FOREIGN KEY (lead_id) REFERENCES leads(id)
+      FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE
     );
 
     CREATE INDEX IF NOT EXISTS idx_history_lead ON lead_history(lead_id);
@@ -80,6 +92,15 @@ export async function initDb() {
       created_at TEXT NOT NULL
     );
   `)
+
+  // 2. The 30-Day Auto-Purge (Turso equivalent to pg_cron)
+  // Cleans up any leads older than 30 days every time the database boots.
+  try {
+    await db.execute(`DELETE FROM leads WHERE first_seen_at < datetime('now', '-30 days')`)
+  } catch (err) {
+    console.error('Failed to execute 30-day purge:', err)
+  }
+
   return db
 }
 
@@ -94,7 +115,6 @@ export async function upsertLeads(leads, queryUsed) {
   for (const lead of leads) {
     const id = fingerprint(lead)
 
-    // Fetch existing lead to calculate differences
     const existingResult = await database.execute({
       sql: `SELECT * FROM leads WHERE id = ?`,
       args: [id]
@@ -180,7 +200,6 @@ export async function upsertLeads(leads, queryUsed) {
     annotations.set(lead.id, { dbId: id, isNew: false, changes, status: existing.status })
   }
 
-  // Execute all inserts/updates in a single network batch
   if (statements.length > 0) {
     await database.batch(statements, 'write')
   }
@@ -223,7 +242,7 @@ export async function countLeads(filters = {}) {
   }
 
   const result = await database.execute({ sql, args })
-  return result.rows[0].n
+  return Number(result.rows[0].n)
 }
 
 export async function listLeads({
@@ -275,7 +294,7 @@ export async function listLeads({
   args.push(limit, offset)
 
   const result = await database.execute({ sql, args })
-  return result.rows
+  return serializeRows(result.rows)
 }
 
 export async function getLeadHistory(leadId) {
@@ -286,7 +305,7 @@ export async function getLeadHistory(leadId) {
     sql: `SELECT * FROM lead_history WHERE lead_id = ? ORDER BY changed_at DESC`,
     args: [leadId]
   })
-  return result.rows
+  return serializeRows(result.rows)
 }
 
 export async function setLeadStatus(leadId, status) {
@@ -349,15 +368,15 @@ export async function getDbStats() {
   )
 
   return {
-    total: totalRes.rows[0].n,
-    noWebsite: noWebsiteRes.rows[0].n,
-    byStatus: byStatusRes.rows,
-    recentChanges: recentChangesRes.rows[0].n
+    total: Number(totalRes.rows[0].n),
+    noWebsite: Number(noWebsiteRes.rows[0].n),
+    byStatus: serializeRows(byStatusRes.rows),
+    recentChanges: Number(recentChangesRes.rows[0].n)
   }
 }
 
 function withZeroFilledCounts(rows, allKeys, keyField) {
-  const byKey = new Map(rows.map((r) => [r[keyField], r.n]))
+  const byKey = new Map(rows.map((r) => [r[keyField], Number(r.n)]))
   return allKeys.map((key) => ({ [keyField]: key, n: byKey.get(key) || 0 }))
 }
 
@@ -398,13 +417,14 @@ export async function getDashboardStats() {
   const byStatusRes = await database.execute(
     `SELECT status, COUNT(*) AS n FROM leads GROUP BY status`
   )
-  const byStatus = withZeroFilledCounts(byStatusRes.rows, LEAD_STATUSES, 'status')
+  const byStatus = withZeroFilledCounts(serializeRows(byStatusRes.rows), LEAD_STATUSES, 'status')
 
   const byCategoryRes = await database.execute(`
     SELECT category, COUNT(*) AS n FROM leads
     WHERE category IS NOT NULL AND TRIM(category) != ''
     GROUP BY category ORDER BY n DESC LIMIT 6
   `)
+  const byCategory = serializeRows(byCategoryRes.rows)
 
   const ratingRowsRes = await database.execute(`
     SELECT
@@ -418,7 +438,11 @@ export async function getDashboardStats() {
       COUNT(*) AS n
     FROM leads GROUP BY bucket
   `)
-  const byRating = withZeroFilledCounts(ratingRowsRes.rows, RATING_BUCKET_ORDER, 'bucket')
+  const byRating = withZeroFilledCounts(
+    serializeRows(ratingRowsRes.rows),
+    RATING_BUCKET_ORDER,
+    'bucket'
+  )
 
   const trendRowsRes = await database.execute(`
     SELECT substr(first_seen_at, 1, 10) AS day, COUNT(*) AS n
@@ -427,7 +451,8 @@ export async function getDashboardStats() {
     GROUP BY day
   `)
 
-  const trendByDay = new Map(trendRowsRes.rows.map((r) => [r.day, r.n]))
+  const serializedTrendRows = serializeRows(trendRowsRes.rows)
+  const trendByDay = new Map(serializedTrendRows.map((r) => [r.day, r.n]))
   const now = Date.now()
   const dayMs = 24 * 60 * 60 * 1000
   const trend = Array.from({ length: 14 }, (_, i) => {
@@ -445,11 +470,11 @@ export async function getDashboardStats() {
   return {
     total: Number(totalRes.rows[0].n),
     noWebsite: Number(noWebsiteRes.rows[0].n),
-    avgRating: avgRatingRes.rows[0].v != null ? Number(avgRatingRes.rows[0].v) : null,
-    byStatus: byStatus.map((r) => ({ status: r.status, n: Number(r.n) })),
-    byCategory: byCategoryRes.rows.map((r) => ({ category: r.category, n: Number(r.n) })),
-    byRating: byRating.map((r) => ({ bucket: r.bucket, n: Number(r.n) })),
-    trend: trend.map((r) => ({ day: r.day, n: Number(r.n) })),
+    avgRating: avgRatingRes.rows[0].v ? Number(avgRatingRes.rows[0].v) : null,
+    byStatus,
+    byCategory,
+    byRating,
+    trend,
     newLast7Days: Number(newLast7DaysRes.rows[0].n),
     recentChanges: Number(recentChangesRes.rows[0].n)
   }
