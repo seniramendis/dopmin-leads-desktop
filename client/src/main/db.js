@@ -1,9 +1,21 @@
 // src/main/db.js
 //
-// 100% Serverless/Cloud implementation using Turso (libSQL).
-// Bypasses all local C++ compiler requirements by using the pure HTTP /web client.
+// Local SQLite implementation (better-sqlite3). This is the leads DB that
+// powers the Results table, Lead History, and the Dashboard — it lives on
+// disk in the app's userData folder and needs zero setup or external
+// accounts, so the app works fully offline out of the box.
+//
+// NOTE: this is separate from src/main/cloudBridge.js, which is an
+// *optional* feature (triggering a remote GitHub Actions scrape via a
+// Vercel bridge + Turso). That piece still uses Turso for its own job
+// polling and only activates if you configure BRIDGE_URL/TURSO_* — it does
+// not affect the local leads DB below, and the app runs perfectly without
+// it ever being configured.
 import crypto from 'node:crypto'
-import { createClient } from '@libsql/client/web'
+import path from 'node:path'
+import fs from 'node:fs'
+import { app } from 'electron'
+import Database from 'better-sqlite3'
 import { LEAD_STATUSES, TRACKED_CHANGE_FIELDS } from './constants'
 
 // Lazy-load database to prevent Electron boot crashes
@@ -21,8 +33,9 @@ function fingerprint(lead) {
   return crypto.createHash('sha1').update(key).digest('hex')
 }
 
-// Helper to safely serialize Turso rows for Electron IPC
-// Strips custom prototypes and converts BigInts to standard Numbers
+// Kept for shape-compatibility with callers that expect plain JS values
+// (better-sqlite3 already returns plain numbers/strings, but this keeps
+// the "clean object, no surprises over IPC" guarantee explicit).
 function serializeRows(rows) {
   if (!rows) return []
   return rows.map((row) => {
@@ -34,22 +47,27 @@ function serializeRows(rows) {
   })
 }
 
+function resolveDbPath() {
+  // app.getPath is only available once Electron's app is ready; by the
+  // time any IPC handler calls initDb() that's already true. Fall back to
+  // cwd for non-Electron contexts (e.g. running db.js under plain node).
+  const userDataDir = app?.getPath ? app.getPath('userData') : process.cwd()
+  if (!fs.existsSync(userDataDir)) {
+    fs.mkdirSync(userDataDir, { recursive: true })
+  }
+  return path.join(userDataDir, 'dopmin-leads.db')
+}
+
 export async function initDb() {
   if (db) return db // If already connected, skip
 
-  const url = process.env.TURSO_DATABASE_URL || process.env.VITE_TURSO_DATABASE_URL
-  const authToken = process.env.TURSO_AUTH_TOKEN || process.env.VITE_TURSO_AUTH_TOKEN
-
-  if (!url) {
-    console.error('CRITICAL ERROR: Turso URL is missing from environment variables.')
-    return null
-  }
-
-  // Initialize the client safely
-  db = createClient({ url, authToken })
+  const dbPath = resolveDbPath()
+  db = new Database(dbPath)
+  db.pragma('journal_mode = WAL')
+  db.pragma('foreign_keys = ON')
 
   // 1. Build Tables
-  await db.executeMultiple(`
+  db.exec(`
     CREATE TABLE IF NOT EXISTS leads (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -81,7 +99,7 @@ export async function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_history_lead ON lead_history(lead_id);
     CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
-    
+
     CREATE VIRTUAL TABLE IF NOT EXISTS leads_fts USING fts5(
       id UNINDEXED, name, category, address, content=''
     );
@@ -93,10 +111,10 @@ export async function initDb() {
     );
   `)
 
-  // 2. The 30-Day Auto-Purge (Turso equivalent to pg_cron)
-  // Cleans up any leads older than 30 days every time the database boots.
+  // 2. The 30-Day Auto-Purge. Cleans up any leads older than 30 days every
+  // time the database boots.
   try {
-    await db.execute(`DELETE FROM leads WHERE first_seen_at < datetime('now', '-30 days')`)
+    db.prepare(`DELETE FROM leads WHERE first_seen_at < datetime('now', '-30 days')`).run()
   } catch (err) {
     console.error('Failed to execute 30-day purge:', err)
   }
@@ -110,99 +128,88 @@ export async function upsertLeads(leads, queryUsed) {
 
   const now = new Date().toISOString()
   const annotations = new Map()
-  const statements = []
 
-  for (const lead of leads) {
-    const id = fingerprint(lead)
+  const getExisting = database.prepare(`SELECT * FROM leads WHERE id = ?`)
+  const insertLead = database.prepare(`
+    INSERT INTO leads
+      (id, name, category, phone, address, maps_url, rating, review_count, has_website, website, reputation, status, query_used, first_seen_at, last_seen_at, times_seen)
+    VALUES (@id, @name, @category, @phone, @address, @mapsUrl, @rating, @reviewCount, @hasWebsite, @website, @reputation, 'new', @queryUsed, @now, @now, 1)
+  `)
+  const updateLead = database.prepare(`
+    UPDATE leads SET
+      category = @category, phone = @phone, address = @address, maps_url = @mapsUrl,
+      rating = @rating, review_count = @reviewCount, has_website = @hasWebsite,
+      website = @website, reputation = @reputation, query_used = @queryUsed,
+      last_seen_at = @now, times_seen = times_seen + 1
+    WHERE id = @id
+  `)
+  const deleteFts = database.prepare(`DELETE FROM leads_fts WHERE id = ?`)
+  const insertFts = database.prepare(
+    `INSERT INTO leads_fts (id, name, category, address) VALUES (?, ?, ?, ?)`
+  )
+  const insertHistory = database.prepare(`
+    INSERT INTO lead_history (lead_id, changed_at, field, old_value, new_value)
+    VALUES (?, ?, ?, ?, ?)
+  `)
 
-    const existingResult = await database.execute({
-      sql: `SELECT * FROM leads WHERE id = ?`,
-      args: [id]
-    })
-    const existing = existingResult.rows[0]
+  const run = database.transaction((leadsToProcess) => {
+    for (const lead of leadsToProcess) {
+      const id = fingerprint(lead)
+      const existing = getExisting.get(id)
 
-    const params = {
-      id,
-      name: lead.name || 'Unnamed business',
-      category: lead.category || '',
-      phone: lead.phone || '',
-      address: lead.address || '',
-      mapsUrl: lead.mapsUrl || '',
-      rating: lead.rating ?? null,
-      reviewCount: lead.reviewCount ?? 0,
-      hasWebsite: lead.hasWebsite ? 1 : 0,
-      website: lead.website || '',
-      reputation: lead.reputation || 'unrated',
-      queryUsed: queryUsed || '',
-      now
-    }
-
-    if (!existing) {
-      statements.push({
-        sql: `INSERT INTO leads 
-          (id, name, category, phone, address, maps_url, rating, review_count, has_website, website, reputation, status, query_used, first_seen_at, last_seen_at, times_seen) 
-          VALUES (:id, :name, :category, :phone, :address, :mapsUrl, :rating, :reviewCount, :hasWebsite, :website, :reputation, 'new', :queryUsed, :now, :now, 1)`,
-        args: params
-      })
-      statements.push({
-        sql: `DELETE FROM leads_fts WHERE id = ?`,
-        args: [id]
-      })
-      statements.push({
-        sql: `INSERT INTO leads_fts (id, name, category, address) VALUES (?, ?, ?, ?)`,
-        args: [id, params.name, params.category, params.address]
-      })
-
-      annotations.set(lead.id, { dbId: id, isNew: true, changes: [], status: 'new' })
-      continue
-    }
-
-    const changes = []
-    const existingSnapshot = {
-      hasWebsite: !!existing.has_website,
-      rating: existing.rating,
-      reviewCount: existing.review_count,
-      website: existing.website
-    }
-
-    for (const field of TRACKED_CHANGE_FIELDS) {
-      const oldVal = existingSnapshot[field]
-      const newVal = field === 'hasWebsite' ? !!lead.hasWebsite : lead[field]
-      if (oldVal !== newVal && !(oldVal == null && newVal == null)) {
-        changes.push({ field, oldVal, newVal })
-        statements.push({
-          sql: `INSERT INTO lead_history (lead_id, changed_at, field, old_value, new_value) VALUES (?, ?, ?, ?, ?)`,
-          args: [id, now, field, String(oldVal ?? ''), String(newVal ?? '')]
-        })
+      const params = {
+        id,
+        name: lead.name || 'Unnamed business',
+        category: lead.category || '',
+        phone: lead.phone || '',
+        address: lead.address || '',
+        mapsUrl: lead.mapsUrl || '',
+        rating: lead.rating ?? null,
+        reviewCount: lead.reviewCount ?? 0,
+        hasWebsite: lead.hasWebsite ? 1 : 0,
+        website: lead.website || '',
+        reputation: lead.reputation || 'unrated',
+        queryUsed: queryUsed || '',
+        now
       }
+
+      if (!existing) {
+        insertLead.run(params)
+        deleteFts.run(id)
+        insertFts.run(id, params.name, params.category, params.address)
+
+        annotations.set(lead.id, { dbId: id, isNew: true, changes: [], status: 'new' })
+        continue
+      }
+
+      const changes = []
+      const existingSnapshot = {
+        hasWebsite: !!existing.has_website,
+        rating: existing.rating,
+        reviewCount: existing.review_count,
+        website: existing.website
+      }
+
+      for (const field of TRACKED_CHANGE_FIELDS) {
+        const oldVal = existingSnapshot[field]
+        const newVal = field === 'hasWebsite' ? !!lead.hasWebsite : lead[field]
+        if (oldVal !== newVal && !(oldVal == null && newVal == null)) {
+          changes.push({ field, oldVal, newVal })
+          insertHistory.run(id, now, field, String(oldVal ?? ''), String(newVal ?? ''))
+        }
+      }
+
+      params.queryUsed = queryUsed || existing.query_used
+
+      updateLead.run(params)
+      deleteFts.run(id)
+      insertFts.run(id, params.name, params.category, params.address)
+
+      annotations.set(lead.id, { dbId: id, isNew: false, changes, status: existing.status })
     }
+  })
 
-    params.queryUsed = queryUsed || existing.query_used
-
-    statements.push({
-      sql: `UPDATE leads SET 
-        category = :category, phone = :phone, address = :address, maps_url = :mapsUrl, 
-        rating = :rating, review_count = :reviewCount, has_website = :hasWebsite, 
-        website = :website, reputation = :reputation, query_used = :queryUsed, 
-        last_seen_at = :now, times_seen = times_seen + 1 
-        WHERE id = :id`,
-      args: params
-    })
-    statements.push({
-      sql: `DELETE FROM leads_fts WHERE id = ?`,
-      args: [id]
-    })
-    statements.push({
-      sql: `INSERT INTO leads_fts (id, name, category, address) VALUES (?, ?, ?, ?)`,
-      args: [id, params.name, params.category, params.address]
-    })
-
-    annotations.set(lead.id, { dbId: id, isNew: false, changes, status: existing.status })
-  }
-
-  if (statements.length > 0) {
-    await database.batch(statements, 'write')
-  }
+  run(leads)
 
   return annotations
 }
@@ -241,8 +248,8 @@ export async function countLeads(filters = {}) {
     sql = `SELECT COUNT(*) AS n FROM leads ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}`
   }
 
-  const result = await database.execute({ sql, args })
-  return Number(result.rows[0].n)
+  const row = database.prepare(sql).get(...args)
+  return Number(row.n)
 }
 
 export async function listLeads({
@@ -293,19 +300,18 @@ export async function listLeads({
   }
   args.push(limit, offset)
 
-  const result = await database.execute({ sql, args })
-  return serializeRows(result.rows)
+  const rows = database.prepare(sql).all(...args)
+  return serializeRows(rows)
 }
 
 export async function getLeadHistory(leadId) {
   const database = await initDb()
   if (!database) return []
 
-  const result = await database.execute({
-    sql: `SELECT * FROM lead_history WHERE lead_id = ? ORDER BY changed_at DESC`,
-    args: [leadId]
-  })
-  return serializeRows(result.rows)
+  const rows = database
+    .prepare(`SELECT * FROM lead_history WHERE lead_id = ? ORDER BY changed_at DESC`)
+    .all(leadId)
+  return serializeRows(rows)
 }
 
 export async function setLeadStatus(leadId, status) {
@@ -315,24 +321,20 @@ export async function setLeadStatus(leadId, status) {
   if (!LEAD_STATUSES.includes(status)) {
     throw new Error(`Invalid status "${status}". Must be one of: ${LEAD_STATUSES.join(', ')}`)
   }
-  await database.execute({
-    sql: `UPDATE leads SET status = ? WHERE id = ?`,
-    args: [status, leadId]
-  })
+  database.prepare(`UPDATE leads SET status = ? WHERE id = ?`).run(status, leadId)
 }
 
 export async function getCachedAnalysis(cacheKey) {
   const database = await initDb()
   if (!database) return null
 
-  const result = await database.execute({
-    sql: 'SELECT payload, created_at FROM analysis_cache WHERE cache_key = ?',
-    args: [cacheKey]
-  })
-  if (result.rows.length === 0) return null
+  const row = database
+    .prepare('SELECT payload, created_at FROM analysis_cache WHERE cache_key = ?')
+    .get(cacheKey)
+  if (!row) return null
 
   try {
-    return { ...JSON.parse(result.rows[0].payload), cachedAt: result.rows[0].created_at }
+    return { ...JSON.parse(row.payload), cachedAt: row.created_at }
   } catch {
     return null
   }
@@ -345,33 +347,32 @@ export async function setCachedAnalysis(cacheKey, value) {
   const now = new Date().toISOString()
   const payload = JSON.stringify(value)
 
-  await database.execute({
-    sql: `INSERT INTO analysis_cache (cache_key, payload, created_at) VALUES (?, ?, ?)
-          ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at`,
-    args: [cacheKey, payload, now]
-  })
+  database
+    .prepare(
+      `INSERT INTO analysis_cache (cache_key, payload, created_at) VALUES (?, ?, ?)
+       ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at`
+    )
+    .run(cacheKey, payload, now)
 }
 
 export async function getDbStats() {
   const database = await initDb()
   if (!database) return { total: 0, noWebsite: 0, byStatus: [], recentChanges: 0 }
 
-  const totalRes = await database.execute(`SELECT COUNT(*) AS n FROM leads`)
-  const noWebsiteRes = await database.execute(
-    `SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`
-  )
-  const byStatusRes = await database.execute(
-    `SELECT status, COUNT(*) AS n FROM leads GROUP BY status`
-  )
-  const recentChangesRes = await database.execute(
-    `SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`
-  )
+  const total = database.prepare(`SELECT COUNT(*) AS n FROM leads`).get()
+  const noWebsite = database.prepare(`SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`).get()
+  const byStatusRows = database
+    .prepare(`SELECT status, COUNT(*) AS n FROM leads GROUP BY status`)
+    .all()
+  const recentChanges = database
+    .prepare(`SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`)
+    .get()
 
   return {
-    total: Number(totalRes.rows[0].n),
-    noWebsite: Number(noWebsiteRes.rows[0].n),
-    byStatus: serializeRows(byStatusRes.rows),
-    recentChanges: Number(recentChangesRes.rows[0].n)
+    total: Number(total.n),
+    noWebsite: Number(noWebsite.n),
+    byStatus: serializeRows(byStatusRows),
+    recentChanges: Number(recentChanges.n)
   }
 }
 
@@ -380,13 +381,6 @@ function withZeroFilledCounts(rows, allKeys, keyField) {
   return allKeys.map((key) => ({ [keyField]: key, n: byKey.get(key) || 0 }))
 }
 
-function ratingBucketOf(rating) {
-  if (rating == null) return 'Unrated'
-  if (rating >= 4.5) return '4.5★+'
-  if (rating >= 4.0) return '4.0–4.4★'
-  if (rating >= 3.0) return '3.0–3.9★'
-  return 'Under 3★'
-}
 const RATING_BUCKET_ORDER = ['4.5★+', '4.0–4.4★', '3.0–3.9★', 'Under 3★', 'Unrated']
 
 export async function getDashboardStats() {
@@ -406,52 +400,59 @@ export async function getDashboardStats() {
     }
   }
 
-  const totalRes = await database.execute(`SELECT COUNT(*) AS n FROM leads`)
-  const noWebsiteRes = await database.execute(
-    `SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`
-  )
-  const avgRatingRes = await database.execute(
-    `SELECT AVG(rating) AS v FROM leads WHERE rating IS NOT NULL`
-  )
+  const total = database.prepare(`SELECT COUNT(*) AS n FROM leads`).get()
+  const noWebsite = database.prepare(`SELECT COUNT(*) AS n FROM leads WHERE has_website = 0`).get()
+  const avgRatingRow = database
+    .prepare(`SELECT AVG(rating) AS v FROM leads WHERE rating IS NOT NULL`)
+    .get()
 
-  const byStatusRes = await database.execute(
-    `SELECT status, COUNT(*) AS n FROM leads GROUP BY status`
-  )
-  const byStatus = withZeroFilledCounts(serializeRows(byStatusRes.rows), LEAD_STATUSES, 'status')
+  const byStatusRows = database
+    .prepare(`SELECT status, COUNT(*) AS n FROM leads GROUP BY status`)
+    .all()
+  const byStatus = withZeroFilledCounts(serializeRows(byStatusRows), LEAD_STATUSES, 'status')
 
-  const byCategoryRes = await database.execute(`
-    SELECT category, COUNT(*) AS n FROM leads
-    WHERE category IS NOT NULL AND TRIM(category) != ''
-    GROUP BY category ORDER BY n DESC LIMIT 6
-  `)
-  const byCategory = serializeRows(byCategoryRes.rows)
-
-  const ratingRowsRes = await database.execute(`
-    SELECT
-      CASE
-        WHEN rating IS NULL THEN 'Unrated'
-        WHEN rating >= 4.5 THEN '4.5★+'
-        WHEN rating >= 4.0 THEN '4.0–4.4★'
-        WHEN rating >= 3.0 THEN '3.0–3.9★'
-        ELSE 'Under 3★'
-      END AS bucket,
-      COUNT(*) AS n
-    FROM leads GROUP BY bucket
-  `)
-  const byRating = withZeroFilledCounts(
-    serializeRows(ratingRowsRes.rows),
-    RATING_BUCKET_ORDER,
-    'bucket'
+  const byCategory = serializeRows(
+    database
+      .prepare(
+        `
+        SELECT category, COUNT(*) AS n FROM leads
+        WHERE category IS NOT NULL AND TRIM(category) != ''
+        GROUP BY category ORDER BY n DESC LIMIT 6
+        `
+      )
+      .all()
   )
 
-  const trendRowsRes = await database.execute(`
-    SELECT substr(first_seen_at, 1, 10) AS day, COUNT(*) AS n
-    FROM leads
-    WHERE first_seen_at >= datetime('now', '-14 days')
-    GROUP BY day
-  `)
+  const ratingRows = database
+    .prepare(
+      `
+      SELECT
+        CASE
+          WHEN rating IS NULL THEN 'Unrated'
+          WHEN rating >= 4.5 THEN '4.5★+'
+          WHEN rating >= 4.0 THEN '4.0–4.4★'
+          WHEN rating >= 3.0 THEN '3.0–3.9★'
+          ELSE 'Under 3★'
+        END AS bucket,
+        COUNT(*) AS n
+      FROM leads GROUP BY bucket
+      `
+    )
+    .all()
+  const byRating = withZeroFilledCounts(serializeRows(ratingRows), RATING_BUCKET_ORDER, 'bucket')
 
-  const serializedTrendRows = serializeRows(trendRowsRes.rows)
+  const trendRows = database
+    .prepare(
+      `
+      SELECT substr(first_seen_at, 1, 10) AS day, COUNT(*) AS n
+      FROM leads
+      WHERE first_seen_at >= datetime('now', '-14 days')
+      GROUP BY day
+      `
+    )
+    .all()
+
+  const serializedTrendRows = serializeRows(trendRows)
   const trendByDay = new Map(serializedTrendRows.map((r) => [r.day, r.n]))
   const now = Date.now()
   const dayMs = 24 * 60 * 60 * 1000
@@ -460,22 +461,22 @@ export async function getDashboardStats() {
     return { day, n: trendByDay.get(day) || 0 }
   })
 
-  const newLast7DaysRes = await database.execute(
-    `SELECT COUNT(*) AS n FROM leads WHERE first_seen_at >= datetime('now', '-7 days')`
-  )
-  const recentChangesRes = await database.execute(
-    `SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`
-  )
+  const newLast7Days = database
+    .prepare(`SELECT COUNT(*) AS n FROM leads WHERE first_seen_at >= datetime('now', '-7 days')`)
+    .get()
+  const recentChanges = database
+    .prepare(`SELECT COUNT(*) AS n FROM lead_history WHERE changed_at >= datetime('now', '-7 days')`)
+    .get()
 
   return {
-    total: Number(totalRes.rows[0].n),
-    noWebsite: Number(noWebsiteRes.rows[0].n),
-    avgRating: avgRatingRes.rows[0].v ? Number(avgRatingRes.rows[0].v) : null,
+    total: Number(total.n),
+    noWebsite: Number(noWebsite.n),
+    avgRating: avgRatingRow.v ? Number(avgRatingRow.v) : null,
     byStatus,
     byCategory,
     byRating,
     trend,
-    newLast7Days: Number(newLast7DaysRes.rows[0].n),
-    recentChanges: Number(recentChangesRes.rows[0].n)
+    newLast7Days: Number(newLast7Days.n),
+    recentChanges: Number(recentChanges.n)
   }
 }
