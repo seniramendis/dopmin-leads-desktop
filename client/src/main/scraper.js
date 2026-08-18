@@ -17,6 +17,8 @@
 // A bare place name (no business type) is fanned out into several category
 // queries by queryExpansion.js before phase 1 runs, so "Mount Lavinia"
 // finds real businesses instead of a near-empty result.
+import { spawn } from 'child_process'
+import path from 'path'
 import { chromium } from 'playwright'
 import {
   REPUTATION_THRESHOLDS,
@@ -59,8 +61,7 @@ async function blockHeavyResources(context) {
 }
 
 /** Tiny concurrency-limited map — runs `worker` over `items` with at most
- 
-* `limit` in flight at once, in-order results. Avoids pulling in a
+ * `limit` in flight at once, in-order results. Avoids pulling in a
  * dependency for something this small. */
 async function mapWithConcurrency(items, limit, worker) {
   const results = new Array(items.length)
@@ -619,4 +620,62 @@ export async function scrapeLeads(query, maxResults = 20, onProgress, options = 
   } finally {
     await browser.close()
   }
+}
+
+/**
+ * Integrates with the Python backend (`backend/scrape_task.py`)
+ * Spawns the Scrapling-based worker as a child process.
+ */
+export function runScraper(targetUrl, jobId = null) {
+  return new Promise((resolve, reject) => {
+    // Ensure cross-platform compatibility for the python executable
+    const pythonExecutable = process.platform === 'win32' ? 'python' : 'python3'
+
+    // Target the specific scrape_task.py file in your backend folder
+    const scriptPath = path.join(__dirname, '../../../backend/scrape_task.py')
+
+    // Pass targetUrl as the first positional argument, and jobId as the second if provided.
+    // (Matches sys.argv in your Python script)
+    const args = [scriptPath, targetUrl]
+    if (jobId) {
+      args.push(jobId)
+    }
+
+    // Pass process.env so the Python script can read the Turso credentials
+    const scraperProcess = spawn(pythonExecutable, args, {
+      env: process.env
+    })
+
+    let outputLog = ''
+    let errorLog = ''
+
+    // Capture standard output (plaintext progress logs)
+    scraperProcess.stdout.on('data', (data) => {
+      const msg = data.toString()
+      outputLog += msg
+      console.log(`[Scraper Info]: ${msg.trim()}`)
+    })
+
+    // Capture standard error (for actual Python exceptions)
+    scraperProcess.stderr.on('data', (data) => {
+      const msg = data.toString()
+      errorLog += msg
+      console.error(`[Scraper Error]: ${msg.trim()}`)
+    })
+
+    scraperProcess.on('close', (code) => {
+      if (code !== 0) {
+        return reject(
+          new Error(`Scraper exited with code ${code}.\nLogs: ${errorLog || outputLog}`)
+        )
+      }
+
+      // Resolve immediately on success since Python handles the Turso DB upsert
+      resolve({
+        status: 'success',
+        message: 'Scrape job completed and pushed to Turso.',
+        jobId: jobId
+      })
+    })
+  })
 }

@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 pydantic
-scrapling
+scrapling[fetchers]
 curl_cffi
 slowapi
 libsql-client
