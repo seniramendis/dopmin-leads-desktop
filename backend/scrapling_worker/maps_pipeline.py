@@ -1,14 +1,14 @@
-"""Full Scrapling port of client/src/main/scraper.js's Google Maps pipeline.
-
-Two-phase design (unchanged from the JS original):
-  Phase 1 (discovery) — scroll the results feed for the query and collect
-  every unique place URL. Cheap: only anchor hrefs + aria-labels are read.
-
-  Phase 2 (extraction) — visit each place's own detail page (in a pool of
-  parallel pages) and read the sidebar directly. Every listing renders the
-  same sidebar, which is what makes phone numbers and website presence
-  trustworthy.
+"""Pure Playwright port of client/src/main/scraper.js's Google Maps pipeline.
+Scrapling has been completely removed to fix SPA hydration race conditions.
 """
+
+import sys
+import io
+
+# CRITICAL FIX: Force UTF-8 output for Windows console / Node IPC 
+# This prevents the 'charmap' crash when Google Maps returns \u202f spaces in prices/reviews.
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import asyncio
 import random
@@ -16,7 +16,7 @@ import re
 import time
 from urllib.parse import quote, urlencode, urljoin, urlparse, parse_qs, urlunparse
 
-from scrapling.fetchers import AsyncStealthySession
+from playwright.async_api import async_playwright
 
 from constants import (
     REPUTATION_THRESHOLDS,
@@ -82,11 +82,10 @@ def with_locale(href):
         return href
 
 
-async def _page_text(page):
-    try:
-        return await page.evaluate("() => document.body?.innerText || ''")
-    except Exception:
-        return ""
+def clean_text(text):
+    """Failsafe to scrub unicode spaces if the IO wrapper misses them."""
+    if not text: return ""
+    return str(text).replace('\u202f', ' ').replace('\xa0', ' ').strip()
 
 
 async def _dismiss_consent(page):
@@ -96,92 +95,19 @@ async def _dismiss_consent(page):
         'form[action*="consent"] button',
     ):
         try:
-            btn = await page.query_selector(selector)
-            if btn:
+            btn = page.locator(selector).first
+            if await btn.is_visible(timeout=1000):
                 await btn.click(timeout=2000)
-                await page.wait_for_timeout(1200)
+                await page.wait_for_timeout(1000)
                 return
         except Exception:
             continue
 
 
-async def _discovery_action(page, state, desired, on_progress, shared=None, global_desired=None):
-    try:
-        await page.wait_for_selector('div[role="feed"], div[role="main"]', timeout=15000)
-    except Exception:
-        pass
-
-    if BLOCKED_RE.search(await _page_text(page)):
-        state["blocked"] = True
-        return
-
-    await _dismiss_consent(page)
-    await page.wait_for_timeout(1000)
-
-    previous_count = 0
-    stagnant_rounds = 0
-    max_rounds = min(120, desired // 3 + 21)
-
-    for _ in range(max_rounds):
-        if shared is not None and global_desired is not None and len(shared["listings"]) >= global_desired:
-            break
-
-        try:
-            feed_box = await page.query_selector('div[role="feed"]')
-            if feed_box:
-                box = await feed_box.bounding_box()
-                if box:
-                    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                    await page.mouse.wheel(0, 1600)
-        except Exception:
-            pass
-
-        try:
-            current_count = await page.evaluate(
-                """() => {
-                    const feed = document.querySelector('div[role="feed"]');
-                    if (feed) feed.scrollTop = feed.scrollHeight;
-                    else window.scrollTo(0, document.body.scrollHeight);
-                    return document.querySelectorAll('a[href*="/maps/place/"]').length;
-                }"""
-            )
-        except Exception:
-            current_count = previous_count
-
-        on_progress({"phase": "discovering", "found": current_count, "target": desired})
-
-        if current_count >= desired:
-            break
-
-        try:
-            reached_end = await page.evaluate(
-                "() => /you.?ve reached the end of the list/i.test(document.body?.innerText || '')"
-            )
-        except Exception:
-            reached_end = False
-        if reached_end:
-            break
-
-        if current_count <= previous_count:
-            stagnant_rounds += 1
-            if stagnant_rounds >= 4:
-                break
-        else:
-            stagnant_rounds = 0
-
-        previous_count = current_count
-        await asyncio.sleep(random.uniform(0.3, 0.5))
-
-
-async def _consent_only_action(page, _state, _desired, _on_progress):
-    await _dismiss_consent(page)
-
-
-async def _run_sub_query(session, sub_query, index, total, desired, shared, on_progress, health):
+async def _run_sub_query(browser, sub_query, index, total, desired, shared, on_progress, health):
     if len(shared["listings"]) >= desired or shared["rate_limited"] or health.aborted:
         return
-    global_desired = desired
-
+    
     shared["launched"] += 1
     search_url = f"https://www.google.com/maps/search/{quote(sub_query)}?hl=en"
 
@@ -197,46 +123,92 @@ async def _run_sub_query(session, sub_query, index, total, desired, shared, on_p
         }
     )
 
-    state = {"blocked": False}
-    remaining = max(1, desired - len(shared["listings"]))
-
-    async def action(page):
-        await _discovery_action(
-            page, state, remaining, on_progress, shared=shared, global_desired=global_desired
-        )
-
+    context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+    page = await context.new_page()
+    
     try:
         nav_start = time.monotonic()
-        page = await session.fetch(
-            search_url,
-            page_action=action,
-            timeout=60000,
-            network_idle=False,
-            wait=300,
-        )
+        await page.goto(search_url, timeout=60000, wait_until="domcontentloaded")
         health.record_success((time.monotonic() - nav_start) * 1000)
+        
+        page_text = await page.evaluate("() => document.body?.innerText || ''")
+        if BLOCKED_RE.search(page_text):
+            shared["rate_limited"] = True
+            raise RateLimitedError()
+
+        await _dismiss_consent(page)
+        
+        try:
+            await page.wait_for_selector('div[role="feed"], div[role="main"]', timeout=15000)
+        except Exception:
+            pass
+
+        previous_count = 0
+        stagnant_rounds = 0
+        max_rounds = min(120, desired // 3 + 21)
+
+        for _ in range(max_rounds):
+            if len(shared["listings"]) >= desired:
+                break
+
+            try:
+                feed_box = page.locator('div[role="feed"]').first
+                if await feed_box.is_visible():
+                    await feed_box.hover()
+                    await page.mouse.wheel(0, 1600)
+            except Exception:
+                pass
+
+            try:
+                current_count = await page.evaluate("""() => {
+                    const feed = document.querySelector('div[role="feed"]');
+                    if (feed) feed.scrollTop = feed.scrollHeight;
+                    else window.scrollTo(0, document.body.scrollHeight);
+                    return document.querySelectorAll('a[href*="/maps/place/"]').length;
+                }""")
+            except Exception:
+                current_count = previous_count
+
+            on_progress({"phase": "discovering", "found": current_count, "target": desired})
+
+            if current_count >= desired:
+                break
+
+            try:
+                reached_end = await page.evaluate("() => /you.?ve reached the end of the list/i.test(document.body?.innerText || '')")
+                if reached_end:
+                    break
+            except Exception:
+                pass
+
+            if current_count <= previous_count:
+                stagnant_rounds += 1
+                if stagnant_rounds >= 4:
+                    break
+            else:
+                stagnant_rounds = 0
+
+            previous_count = current_count
+            await asyncio.sleep(random.uniform(0.3, 0.5))
+
+        anchors = await page.locator('a[href*="/maps/place/"]').all()
+        for anchor in anchors:
+            href = await anchor.get_attribute("href")
+            if not href: continue
+            href = urljoin("https://www.google.com/maps/", href)
+            key = canonical_place_key(href)
+            if key in shared["listings"]: continue
+            shared["listings"][key] = {"href": href, "quickName": clean_text(await anchor.get_attribute("aria-label"))}
+
+    except RateLimitedError as e:
+        raise e
     except Exception as error:
         health.record_failure(str(error))
-        return
-
-    if state["blocked"] or BLOCKED_RE.search(page.get_all_text() or ""):
-        if shared["listings"] or shared["launched"] > 1:
-            shared["rate_limited"] = True
-            return
-        raise RateLimitedError()
-
-    for anchor in page.css('a[href*="/maps/place/"]'):
-        href = anchor.attrib.get("href")
-        if not href:
-            continue
-        href = urljoin("https://www.google.com/maps/", href)
-        key = canonical_place_key(href)
-        if key in shared["listings"]:
-            continue
-        shared["listings"][key] = {"href": href, "quickName": anchor.attrib.get("aria-label", "")}
+    finally:
+        await context.close()
 
 
-async def discover_listings(session, sub_queries, desired, on_progress, health, shared=None):
+async def discover_listings(browser, sub_queries, desired, on_progress, health, shared=None):
     if shared is None:
         shared = {
             "listings": {},
@@ -249,13 +221,9 @@ async def discover_listings(session, sub_queries, desired, on_progress, health, 
 
     async def guarded(sub_query, i):
         async with semaphore:
-            await _run_sub_query(
-                session, sub_query, i, len(sub_queries), desired, shared, on_progress, health
-            )
+            await _run_sub_query(browser, sub_query, i, len(sub_queries), desired, shared, on_progress, health)
 
-    results = await asyncio.gather(
-        *(guarded(q, i) for i, q in enumerate(sub_queries)), return_exceptions=True
-    )
+    results = await asyncio.gather(*(guarded(q, i) for i, q in enumerate(sub_queries)), return_exceptions=True)
     for result in results:
         if isinstance(result, RateLimitedError):
             raise result
@@ -263,179 +231,83 @@ async def discover_listings(session, sub_queries, desired, on_progress, health, 
     return shared
 
 
-def _text(selector):
-    """Safely extracts text, bypassing Scrapling/selectolax API quirks."""
-    if selector is None:
-        return ""
-    try:
-        return selector.get_all_text(strip=True) or ""
-    except AttributeError:
-        try:
-            return selector.text(strip=True) or ""
-        except Exception:
-            return ""
-
-
-def parse_detail(page, listing):
-    name = _text(page.css_first("h1"))
-
-    phone = ""
-    phone_btn = page.css_first('button[data-item-id^="phone:tel:"]') or page.css_first(
-        'a[href^="tel:"]'
-    )
-    if phone_btn is not None:
-        aria = phone_btn.attrib.get("aria-label", "")
-        href = phone_btn.attrib.get("href", "")
-        phone = (
-            re.sub(r"^phone:\s*", "", aria, flags=re.I).strip()
-            or _text(phone_btn)
-            or href.replace("tel:", "").strip()
-        )
-
-    website_el = page.css_first('a[data-item-id="authority"]')
-    website = website_el.attrib.get("href", "") if website_el is not None else ""
-
-    address_btn = page.css_first('button[data-item-id="address"]')
-    address = (
-        re.sub(r"^address:\s*", "", address_btn.attrib.get("aria-label", ""), flags=re.I).strip()
-        if address_btn is not None
-        else ""
-    )
-
-    category = _text(page.css_first('button[jsaction*="category"]'))
-
-    open_status = ""
-    for span in page.css("span"):
-        text = _text(span)
-        if OPEN_STATUS_RE.match(text):
-            open_status = text
-            break
-
-    rating = None
-    review_count = 0
-    for span in page.css("span[aria-label]"):
-        label = span.attrib.get("aria-label", "")
-        if re.match(r"^[\d.]+\s*star", label, re.I):
-            rating_match = RATING_RE.search(label)
-            review_match = REVIEWS_RE.search(label)
-            rating = float(rating_match.group(1)) if rating_match else None
-            review_count = int(review_match.group(1).replace(",", "")) if review_match else 0
-            break
-
-    return {
-        "name": name,
-        "phone": phone,
-        "hasWebsite": website_el is not None,
-        "website": website,
-        "address": address,
-        "category": category,
-        "openStatus": open_status,
-        "rating": rating,
-        "reviewCount": review_count,
-    }
-
-
-def to_lead(raw, index):
-    """Shape a successful extract_detail() result into the lead dict the
-    Electron UI/db.js consumes (see client/src/renderer/src/components/
-    ResultsTable.svelte and client/src/main/db.js for the required fields).
-
-    This was previously referenced in scrape_leads() but never defined,
-    which threw a NameError right after extraction finished — the scrape
-    would silently report {"success": False}, and the app screen would
-    stay blank even though discovery/extraction had completed fine.
-    """
-    href = raw.get("href", "")
-    rating = raw.get("rating")
-    return {
-        "id": canonical_place_key(href) or f"lead-{index}",
-        "name": raw.get("name") or "Unnamed business",
-        "category": raw.get("category") or "",
-        "phone": raw.get("phone") or "",
-        "address": raw.get("address") or "",
-        "mapsUrl": href,
-        "rating": rating,
-        "reviewCount": raw.get("reviewCount") or 0,
-        "hasWebsite": bool(raw.get("hasWebsite")),
-        "website": raw.get("website") or "",
-        "reputation": classify_reputation(rating),
-    }
-
-
-async def extract_detail(session, listing, health, counters):
+async def extract_detail(browser, listing, health, counters):
     attempt = 0
     last_error = ""
 
     while attempt <= MAX_DETAIL_RETRIES:
         if health.aborted:
-            return {
-                "success": False,
-                "href": listing["href"],
-                "quickName": listing["quickName"],
-                "error": "Connection lost",
-            }
+            return {"success": False, "href": listing["href"], "quickName": listing["quickName"], "error": "Connection lost"}
+
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+        page = await context.new_page()
 
         try:
             nav_start = time.monotonic()
-            state = {"action_error": None}
-
-            async def action(p, state=state):
-                await _dismiss_consent(p)
-
-                # CRITICAL FIX: The Snapshot Race Condition.
-                # Instead of a hand-rolled page.evaluate() polling loop (whose
-                # exceptions Scrapling silently swallows, causing premature blank
-                # snapshots), block on Playwright's own native DOM waiter. It
-                # resolves the instant ANY of the core sidebar elements attaches
-                # to the DOM, and raises a real, catchable TimeoutError otherwise.
-                sidebar_selector = (
-                    'button[data-item-id="address"], '
-                    'button[data-item-id^="phone:tel:"], '
-                    'a[href^="tel:"], '
-                    'a[data-item-id="authority"]'
-                )
-                try:
-                    await p.wait_for_selector(
-                        sidebar_selector,
-                        timeout=15000,  # generous timeout for slow proxies
-                        state="attached",
-                    )
-                    # Small settle delay so React finishes appending classes/
-                    # sibling nodes right after the first match lands.
-                    await p.wait_for_timeout(500)
-                except Exception as e:
-                    # Scrapling swallows exceptions raised inside page_action, so
-                    # raising here would vanish silently and still produce a
-                    # blank snapshot. Stash the error on the shared state dict
-                    # instead, and re-raise it explicitly after session.fetch()
-                    # returns, once we're back in real Python control flow.
-                    state["action_error"] = str(e)
-
-            page = await session.fetch(
-                with_locale(listing["href"]),
-                page_action=action,
-                timeout=45000, # Increased to 45s for safe buffer
-                network_idle=False,
-                wait=1000, # Give Scrapling 1 final second before snapping
-            )
+            await page.goto(with_locale(listing["href"]), timeout=45000, wait_until="domcontentloaded")
             health.record_success((time.monotonic() - nav_start) * 1000)
 
-            if state.get("action_error"):
-                # The sidebar never hydrated in time (or Playwright hit a real
-                # DOM/navigation error) — surface it instead of silently
-                # falling through to parse a blank page.
-                raise RuntimeError(
-                    f"Sidebar failed to hydrate before snapshot: {state['action_error']}"
-                )
+            await _dismiss_consent(page)
 
-            if BLOCKED_RE.search(page.get_all_text() or ""):
-                raise RuntimeError("Rate limited by Google Maps")
+            page_text = await page.evaluate("() => document.body?.innerText || ''")
+            if BLOCKED_RE.search(page_text):
+                raise RateLimitedError()
 
-            detail = parse_detail(page, listing)
+            try:
+                await page.wait_for_selector('h1, button[data-item-id="address"]', timeout=15000)
+                await page.wait_for_timeout(1500) 
+            except Exception:
+                pass
 
-            has_any_detail = bool(
-                detail["name"] or detail["address"] or detail["phone"] or detail["website"]
-            )
+            detail = await page.evaluate('''() => {
+                const getText = (el) => el ? el.innerText.trim() : "";
+                const getAttr = (el, attr) => el ? el.getAttribute(attr) || "" : "";
+
+                const name = getText(document.querySelector('h1'));
+
+                let phone = "";
+                const phoneBtn = document.querySelector('button[data-item-id^="phone:tel:"]') || document.querySelector('a[href^="tel:"]');
+                if (phoneBtn) {
+                    phone = getAttr(phoneBtn, 'aria-label').replace(/^phone:\\s*/i, '').trim() || getText(phoneBtn) || getAttr(phoneBtn, 'href').replace('tel:', '').trim();
+                }
+
+                const websiteEl = document.querySelector('a[data-item-id="authority"]');
+                const website = getAttr(websiteEl, 'href');
+
+                const addressBtn = document.querySelector('button[data-item-id="address"]');
+                const address = getAttr(addressBtn, 'aria-label').replace(/^address:\\s*/i, '').trim();
+
+                const category = getText(document.querySelector('button[jsaction*="category"]'));
+
+                let openStatus = "";
+                for (const span of document.querySelectorAll('span')) {
+                    const txt = getText(span);
+                    if (/^(open|closed|opens|closes)\\b/i.test(txt)) {
+                        openStatus = txt;
+                        break;
+                    }
+                }
+
+                let rating = null;
+                let reviewCount = 0;
+                for (const span of document.querySelectorAll('span[aria-label]')) {
+                    const label = getAttr(span, 'aria-label');
+                    if (/^[\\d.]+\\s*star/i.test(label)) {
+                        const rMatch = label.match(/([\\d.]+)\\s*star/i);
+                        const revMatch = label.match(/([\\d,]+)\\s*review/i);
+                        if (rMatch) rating = parseFloat(rMatch[1]);
+                        if (revMatch) reviewCount = parseInt(revMatch[1].replace(/,/g, ''), 10);
+                        break;
+                    }
+                }
+
+                return {
+                    name, phone, hasWebsite: !!websiteEl, website, address, category, openStatus, rating, reviewCount
+                };
+            }''')
+
+            has_any_detail = bool(detail["name"] or detail["address"] or detail["phone"] or detail["website"])
+            
             if not has_any_detail and attempt < MAX_DETAIL_RETRIES:
                 last_error = "Detail page loaded but no business info was found"
                 attempt += 1
@@ -446,16 +318,17 @@ async def extract_detail(session, listing, health, counters):
             return {
                 "success": True,
                 "href": listing["href"],
-                "name": detail["name"] or listing["quickName"] or "Unnamed business",
-                "phone": detail["phone"] or "",
+                "name": clean_text(detail["name"]) or listing["quickName"] or "Unnamed business",
+                "phone": clean_text(detail["phone"]),
                 "hasWebsite": detail["hasWebsite"],
                 "website": detail["website"],
-                "address": detail["address"],
-                "category": detail["category"],
-                "openStatus": detail["openStatus"],
+                "address": clean_text(detail["address"]),
+                "category": clean_text(detail["category"]),
+                "openStatus": clean_text(detail["openStatus"]),
                 "rating": detail["rating"],
                 "reviewCount": detail["reviewCount"],
             }
+
         except Exception as error:
             last_error = str(error)
             health.record_failure(str(error))
@@ -465,43 +338,51 @@ async def extract_detail(session, listing, health, counters):
                 break
             if attempt <= MAX_DETAIL_RETRIES:
                 await asyncio.sleep(random.uniform(1.0, 2.0))
+        finally:
+            await context.close()
 
-    return {
-        "success": False,
-        "href": listing["href"],
-        "quickName": listing["quickName"],
-        "error": last_error,
-    }
+    return {"success": False, "href": listing["href"], "quickName": listing["quickName"], "error": last_error}
 
 
-async def run_detail_pool(session, listings, on_progress, health):
-    # CRITICAL: Limit concurrency to 3
-    semaphore = asyncio.Semaphore(3)
+async def run_detail_pool(browser, listings, on_progress, health):
+    semaphore = asyncio.Semaphore(3) 
     counters = {"retries": 0, "completed": 0}
     total = len(listings)
 
     async def worker(listing):
         async with semaphore:
-            if health.aborted:
-                return None
-            
-            # CRITICAL: Jitter to avoid bot detection
-            await asyncio.sleep(random.uniform(1.0, 2.5))
-            
-            result = await extract_detail(session, listing, health, counters)
+            if health.aborted: return None
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            result = await extract_detail(browser, listing, health, counters)
             counters["completed"] += 1
-            on_progress(
-                {
-                    "phase": "extracting",
-                    "done": counters["completed"],
-                    "total": total,
-                    "retries": counters["retries"],
-                }
-            )
-            await asyncio.sleep(random.uniform(0.5, 1.0))
+            on_progress({"phase": "extracting", "done": counters["completed"], "total": total, "retries": counters["retries"]})
             return result
 
     return await asyncio.gather(*(worker(listing) for listing in listings))
+
+
+def to_lead(raw, index):
+    rating = raw["rating"] if isinstance(raw.get("rating"), (int, float)) else None
+    reputation = classify_reputation(rating)
+    has_rating = rating is not None
+
+    return {
+        "id": f"{int(time.time() * 1000)}-{index}",
+        "name": raw["name"],
+        "phone": raw.get("phone") or "No phone listed",
+        "address": raw.get("address") or "",
+        "category": raw.get("category") or "",
+        "openStatus": raw.get("openStatus") or "",
+        "status": "Has Website" if raw["hasWebsite"] else "No Website Found",
+        "hasWebsite": raw["hasWebsite"],
+        "website": raw.get("website") or "",
+        "rating": rating,
+        "reviewCount": raw.get("reviewCount", 0),
+        "reputation": reputation,
+        "isHotLead": (not raw["hasWebsite"]) and has_rating and rating >= REPUTATION_THRESHOLDS["good"],
+        "isReputationRisk": (not raw["hasWebsite"]) and has_rating and rating < 3.5,
+        "mapsUrl": raw["href"],
+    }
 
 
 async def scrape_leads(query, max_results=20, options=None, on_progress=lambda payload: None):
@@ -512,37 +393,25 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
     on_progress({"phase": "searching", "message": "Checking your internet connection…"})
     connection = await measure_connection_quality()
     if not connection["reachable"]:
-        return {
-            "success": False,
-            "error": "No internet connection detected. Please check your connection and try again.",
-            "errorType": "offline",
-        }
+        return {"success": False, "error": "No internet connection detected.", "errorType": "offline"}
     if connection["quality"] == "poor":
-        on_progress(
-            {
-                "phase": "connection-slow",
-                "message": f"Connection to Google is slow ({connection['latency_ms']:.0f}ms) — this search may take longer than usual.",
-            }
-        )
+        on_progress({"phase": "connection-slow", "message": f"Connection is slow ({connection['latency_ms']:.0f}ms)."})
 
-    health = NetworkHealth(
-        on_progress=on_progress,
-        slow_threshold_ms=SLOW_NAV_THRESHOLD_MS,
-        max_consecutive_failures=MAX_CONSECUTIVE_NETWORK_FAILURES,
-    )
+    health = NetworkHealth(on_progress=on_progress, slow_threshold_ms=SLOW_NAV_THRESHOLD_MS, max_consecutive_failures=MAX_CONSECUTIVE_NETWORK_FAILURES)
 
     try:
-        async with AsyncStealthySession(
-            max_pages=3, 
-            headless=True,
-            disable_resources=False, 
-            google_search=False, # CRITICAL: True alters Google's internal APIs
-            hide_canvas=True,
-            block_webrtc=True,
-            locale="en-US",
-            timeout=45000, 
-        ) as session:
-            shared = await discover_listings(session, sub_queries, desired, on_progress, health)
+        async with async_playwright() as p:
+            # SHUTTING THE VISUAL TABS DOWN - HEADLESS IS TRUE AGAIN
+            browser = await p.chromium.launch(
+                headless=True, 
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-infobars',
+                    '--no-sandbox',
+                ]
+            )
+
+            shared = await discover_listings(browser, sub_queries, desired, on_progress, health)
             listings = list(shared["listings"].values())
             is_expanded = shared["is_expanded"]
             rate_limited = shared["rate_limited"]
@@ -551,50 +420,22 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
             if not is_expanded and len(listings) < desired and not rate_limited and not health.aborted:
                 broader_queries = broaden_query(sub_queries[0], sub_queries)
                 if broader_queries:
-                    on_progress(
-                        {
-                            "phase": "searching",
-                            "message": f"Only found {len(listings)} — broadening the search to related categories nearby…",
-                        }
-                    )
+                    on_progress({"phase": "searching", "message": f"Only found {len(listings)} — broadening search…"})
                     shared["is_expanded"] = True
-                    shared = await discover_listings(
-                        session, broader_queries, desired, on_progress, health, shared=shared
-                    )
+                    shared = await discover_listings(browser, broader_queries, desired, on_progress, health, shared=shared)
                     listings = list(shared["listings"].values())
                     is_expanded = True
                     queries_used = sub_queries + broader_queries
 
-            if health.aborted:
-                return {
-                    "success": False,
-                    "error": "Your internet connection dropped mid-search. Please check your connection and try again.",
-                    "errorType": "offline",
-                }
-
-            if not listings:
-                return {
-                    "success": True,
-                    "leads": [],
-                    "requested": desired,
-                    "totalFound": 0,
-                    "truncated": False,
-                    "failedCount": 0,
-                    "expanded": is_expanded,
-                    "queriesUsed": queries_used,
-                }
+            if health.aborted: return {"success": False, "error": "Connection dropped mid-search.", "errorType": "offline"}
+            if not listings: return {"success": True, "leads": [], "requested": desired, "totalFound": 0, "truncated": False, "failedCount": 0, "expanded": is_expanded, "queriesUsed": queries_used}
 
             target_listings = listings[:desired]
             on_progress({"phase": "extracting", "done": 0, "total": len(target_listings), "retries": 0})
 
-            detail_results = await run_detail_pool(session, target_listings, on_progress, health)
+            detail_results = await run_detail_pool(browser, target_listings, on_progress, health)
 
-            if health.aborted:
-                return {
-                    "success": False,
-                    "error": "Your internet connection dropped mid-search. Please check your connection and try again.",
-                    "errorType": "offline",
-                }
+            if health.aborted: return {"success": False, "error": "Connection dropped mid-search.", "errorType": "offline"}
 
             attempted = [r for r in detail_results if r]
             succeeded = [r for r in attempted if r.get("success")]
@@ -602,6 +443,8 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
             leads = [to_lead(raw, i) for i, raw in enumerate(succeeded)]
 
             on_progress({"phase": "done", "total": len(leads)})
+
+            await browser.close()
 
             return {
                 "success": True,
@@ -617,9 +460,5 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
         return {"success": False, "error": str(error)}
     except Exception as error:
         if is_network_error(str(error)):
-            return {
-                "success": False,
-                "error": "Your internet connection dropped mid-search. Please check your connection and try again.",
-                "errorType": "offline",
-            }
+            return {"success": False, "error": "Connection dropped mid-search.", "errorType": "offline"}
         return {"success": False, "error": str(error)}
