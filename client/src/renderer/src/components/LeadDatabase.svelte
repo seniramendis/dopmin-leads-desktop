@@ -24,6 +24,7 @@
   import DbTableView from './database/DbTableView.svelte'
 
   let stats = null
+  let statsError = ''
   let viewMode = 'pipeline'
 
   // Shared across both views. Status is deliberately NOT part of this —
@@ -46,8 +47,17 @@
   }
 
   async function loadStats() {
-    const res = await window.api.dbStats()
-    if (res.success) stats = res.stats
+    try {
+      const res = await window.api.dbStats()
+      if (res.success) {
+        stats = res.stats
+        statsError = ''
+      } else {
+        statsError = res.error || 'Could not load database stats.'
+      }
+    } catch (err) {
+      statsError = err.message || 'Could not load database stats.'
+    }
   }
 
   async function exportAll() {
@@ -94,6 +104,10 @@
   </p>
 
   <DbStatsBar {stats} />
+
+  {#if statsError}
+    <p class="error-note">{statsError}</p>
+  {/if}
 
   <DbFilterBar
     bind:searchText
@@ -147,5 +161,11 @@
   .disclaimer-note {
     margin: 0 0 14px;
     max-width: 760px;
+  }
+
+  .error-note {
+    color: var(--red-dark);
+    font-size: 0.84rem;
+    margin: 0 0 12px;
   }
 </style>

@@ -33,7 +33,7 @@ import asyncio
 import random
 import re
 import time
-from urllib.parse import quote, urlencode, urlparse, parse_qs, urlunparse
+from urllib.parse import quote, urlencode, urljoin, urlparse, parse_qs, urlunparse
 
 from scrapling.fetchers import AsyncStealthySession
 
@@ -99,8 +99,13 @@ def classify_reputation(rating):
 
 def with_locale(href):
     """Forces English on any Maps URL so the parsing logic behaves the same
-    no matter which country/city the search targets."""
+    no matter which country/city the search targets. Also guarantees the
+    URL is absolute (see the urljoin fix in _run_sub_query) — belt and
+    suspenders, since a relative URL handed to the browser for navigation
+    has no base page to resolve against and fails outright."""
     try:
+        if not re.match(r"^https?://", href or "", re.I):
+            href = urljoin("https://www.google.com/maps/", href or "")
         parts = urlparse(href)
         query = parse_qs(parts.query)
         query["hl"] = ["en"]
@@ -283,10 +288,27 @@ async def _run_sub_query(session, sub_query, index, total, desired, shared, on_p
     # canonical_place_key above) instead of a list plus a separate `seen`
     # set — one lookup instead of two, and the key itself *is* the
     # de-dup check, so there's no way for them to drift out of sync.
+    #
+    # anchor.attrib["href"] is the RAW href attribute as written in the
+    # HTML, not the resolved DOM property — Google's Maps feed frequently
+    # writes these relative to "/maps/" (e.g. "./place/Some+Biz/
+    # @6.83,79.86,17z/..." with no scheme/host). Handing a relative URL
+    # straight to the browser for navigation later has no base page to
+    # resolve against and fails outright — every single detail-page fetch,
+    # 100% of the time, regardless of connection speed. Resolving against
+    # "https://www.google.com/maps/" here (via urljoin) is what turns
+    # those into real, navigable absolute URLs.
     for anchor in page.css('a[href*="/maps/place/"]'):
         href = anchor.attrib.get("href")
         if not href:
             continue
+        # NOTE: base must be "https://www.google.com/maps/" (trailing
+        # slash), not the full search_url — urljoin treats the last path
+        # segment of the base as a "file" it discards, and search_url's
+        # last segment is the query text itself (e.g. ".../maps/search/
+        # hardware+stores...", no trailing slash), which would resolve
+        # "./place/..." to the wrong directory ("/maps/search/place/...").
+        href = urljoin("https://www.google.com/maps/", href)
         key = canonical_place_key(href)
         if key in shared["listings"]:
             continue
@@ -411,6 +433,17 @@ async def extract_detail(session, listing, health, counters):
                 "error": "Connection lost",
             }
 
+        # Only the *first* attempt waits strictly for "h1" — Google's detail
+        # sidebar usually renders it almost immediately, so this is cheap
+        # when things are working. But on a slow connection, requiring it
+        # was turning "the page took 26s instead of 8s" into a hard failure
+        # for every single listing, even though the sidebar (phone/address/
+        # website) had actually loaded by the time we gave up waiting.
+        # Retries drop the strict wait_selector and just give the page a
+        # fixed, more generous settle time instead, so a slow-but-working
+        # connection still comes back with real data instead of nothing.
+        use_strict_wait = attempt == 0
+
         try:
             nav_start = time.monotonic()
 
@@ -420,10 +453,10 @@ async def extract_detail(session, listing, health, counters):
             page = await session.fetch(
                 with_locale(listing["href"]),
                 page_action=action,
-                wait_selector="h1",
+                wait_selector="h1" if use_strict_wait else None,
                 timeout=NAV_TIMEOUT_MS,
                 network_idle=False,
-                wait=250,
+                wait=250 if use_strict_wait else 1500,
             )
             health.record_success((time.monotonic() - nav_start) * 1000)
 
@@ -431,6 +464,22 @@ async def extract_detail(session, listing, health, counters):
                 raise RuntimeError("Rate limited by Google Maps")
 
             detail = parse_detail(page, listing)
+
+            # A page that loaded but genuinely has nothing usable on it
+            # (no name, no address, no phone, no website) usually means we
+            # landed somewhere other than a business's detail sidebar —
+            # worth one more attempt rather than quietly returning an
+            # empty lead.
+            has_any_detail = bool(
+                detail["name"] or detail["address"] or detail["phone"] or detail["website"]
+            )
+            if not has_any_detail and attempt < MAX_DETAIL_RETRIES:
+                last_error = "Detail page loaded but no business info was found"
+                attempt += 1
+                counters["retries"] += 1
+                await asyncio.sleep(random.uniform(0.4, 0.8))
+                continue
+
             return {
                 "success": True,
                 "href": listing["href"],

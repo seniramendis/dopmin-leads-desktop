@@ -245,7 +245,18 @@
 
         <ResultsTable {leads} {failedCount} />
       {:else if hasSearched && !isScraping && leads.length === 0 && !errorMessage}
-        <Banner variant="info">No results found for this search. Try broadening your query.</Banner>
+        {#if totalFound > 0}
+          <Banner variant="warning">
+            Found {totalFound} listing{totalFound === 1 ? '' : 's'} on Google Maps, but couldn't
+            read the details for any of them{failedCount > 0 ? ` (${failedCount} failed)` : ''} —
+            this usually means a slow or unstable connection, not a bad search. Try running the
+            search again, or lowering Max Results.
+          </Banner>
+        {:else}
+          <Banner variant="info"
+            >No results found for this search. Try broadening your query.</Banner
+          >
+        {/if}
       {/if}
     {/if}
 

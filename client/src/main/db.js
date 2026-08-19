@@ -65,6 +65,13 @@ function persist() {
 }
 
 // --- Thin query helpers over sql.js's statement API -----------------------
+//
+// (A prepared-statement cache was tried here to skip re-parsing repeated
+// query shapes, but sql.js statement handles can go stale across a
+// db.export()/persist() cycle — reusing one threw "Statement closed".
+// prepare()+free() per call is what's actually safe with sql.js, and the
+// indexes below plus the batched upsert lookup are where the real cost was
+// anyway, so this stays simple rather than "clever".)
 
 function run(sql, params = []) {
   db.run(sql, params)
@@ -142,6 +149,19 @@ export async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_history_lead ON lead_history(lead_id);
     CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
 
+    -- listLeads/countLeads always sort by last_seen_at DESC and commonly
+    -- filter on has_website / rating / status together (the pipeline board
+    -- filters status per-column, the table view filters website+rating).
+    -- Without these, every list/count call was a full-table scan followed
+    -- by an O(n log n) sort — fine at a few hundred rows, but it degrades
+    -- fast as the local database grows into the thousands. These let
+    -- SQLite answer "give me page N of {status, has_website, rating>=X}
+    -- ordered by recency" as an index range scan instead.
+    CREATE INDEX IF NOT EXISTS idx_leads_last_seen ON leads(last_seen_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_leads_website ON leads(has_website);
+    CREATE INDEX IF NOT EXISTS idx_leads_rating ON leads(rating);
+    CREATE INDEX IF NOT EXISTS idx_leads_status_last_seen ON leads(status, last_seen_at DESC);
+
     CREATE TABLE IF NOT EXISTS analysis_cache (
       cache_key TEXT PRIMARY KEY,
       payload TEXT NOT NULL,
@@ -169,9 +189,23 @@ export async function upsertLeads(leads, queryUsed) {
   const now = new Date().toISOString()
   const annotations = new Map()
 
-  for (const lead of leads) {
-    const id = fingerprint(lead)
-    const existing = get(`SELECT * FROM leads WHERE id = ?`, [id])
+  // Batch-fetch every existing row this scrape could touch in a single
+  // query instead of one SELECT per lead. A 500-lead scrape previously
+  // meant 500 separate prepare/bind/step round trips just to find out
+  // which leads already existed; this replaces that with one indexed
+  // "WHERE id IN (...)" lookup (id is the PRIMARY KEY, so it's a direct
+  // hash/B-tree lookup, not a scan) plus an in-memory Map, so each lead
+  // in the loop below is an O(1) Map.get() instead of a fresh query.
+  const ids = leads.map(fingerprint)
+  const placeholders = ids.map(() => '?').join(',')
+  const existingRows = ids.length
+    ? all(`SELECT * FROM leads WHERE id IN (${placeholders})`, ids)
+    : []
+  const existingById = new Map(existingRows.map((row) => [row.id, row]))
+
+  leads.forEach((lead, i) => {
+    const id = ids[i]
+    const existing = existingById.get(id) || null
 
     const name = lead.name || 'Unnamed business'
     const category = lead.category || ''
@@ -208,7 +242,7 @@ export async function upsertLeads(leads, queryUsed) {
       )
 
       annotations.set(lead.id, { dbId: id, isNew: true, changes: [], status: 'new' })
-      continue
+      return
     }
 
     const changes = []
@@ -244,7 +278,7 @@ export async function upsertLeads(leads, queryUsed) {
     )
 
     annotations.set(lead.id, { dbId: id, isNew: false, changes, status: existing.status })
-  }
+  })
 
   persist()
 

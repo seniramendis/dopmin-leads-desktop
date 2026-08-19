@@ -16,7 +16,16 @@ NETWORK_ERROR_PATTERN = re.compile(
     r"ERR_CONNECTION_TIMED_OUT|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|"
     r"ERR_CONNECTION_REFUSED|ERR_NAME_NOT_RESOLVED|ERR_ADDRESS_UNREACHABLE|"
     r"ERR_TIMED_OUT|net::ERR_|Temporary failure in name resolution|"
-    r"Name or service not known|getaddrinfo failed",
+    r"Name or service not known|getaddrinfo failed|"
+    # Playwright/Scrapling's own navigation & wait_selector timeouts don't
+    # carry a net::ERR_ code — they read like "Timeout 30000ms exceeded"
+    # or "...waiting for selector \"h1\" to be visible". These were
+    # previously invisible to NetworkHealth entirely: record_failure()
+    # silently no-op'd on them, so a genuinely bad connection just kept
+    # retrying every single listing to exhaustion without ever tripping
+    # the "connection lost" warning the user needed to see.
+    r"Timeout \d+ms exceeded|Timeout exceeded while waiting|"
+    r"waiting for (selector|navigation|event)",
     re.IGNORECASE,
 )
 
