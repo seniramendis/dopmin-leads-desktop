@@ -1,18 +1,11 @@
-"""Full Scrapling port of client/src/main/auditEngine.js — the $0 technical
-audit (SSL, speed, mobile-responsive, SEO/pixel, abandoned-agency) that
-turns "No Website Found" into a sales asset.
-
-The page load now goes through Scrapling's DynamicSession (plain Chromium
-under Scrapling's engine) with disable_resources for speed; raw-HTML checks
-read the returned Response instead of page.content(). DNS checks and the
-plain-HTTP fallback use the socket module and curl_cffi respectively.
+"""Pure Playwright port of the $0 technical audit.
+Scrapling has been completely removed.
 """
 
 import re
 import time
-
 from curl_cffi import requests as curl_requests
-from scrapling.fetchers import DynamicSession
+from playwright.sync_api import sync_playwright
 
 from constants import (
     AUDIT_HTTP_TIMEOUT_MS,
@@ -27,17 +20,8 @@ from constants import (
 from netutil import domain_is_alive, hostname_of, normalize_url
 
 
-def response_html(page):
-    """Raw HTML of a Scrapling Response as text, however it's stored."""
-    html = getattr(page, "html_content", b"")
-    if isinstance(html, bytes):
-        return html.decode("utf-8", "ignore")
-    return str(html or "")
-
-
 def raw_get(target_url, timeout_ms=AUDIT_HTTP_TIMEOUT_MS):
-    """Status-only GET — used for the plain-HTTP fallback and for checking
-    whether a *different* domain (an old agency's site) is dead."""
+    """Status-only GET — used for the plain-HTTP fallback."""
     try:
         response = curl_requests.get(
             target_url,
@@ -52,10 +36,7 @@ def raw_get(target_url, timeout_ms=AUDIT_HTTP_TIMEOUT_MS):
 
 
 def detect_abandoned_agency(page_text, footer_links, site_hostname):
-    """Looks for "Designed by X" / "Powered by X" style credits in the page
-    text or footer links, then checks whether the credited agency's own
-    domain still resolves. A dead agency domain is the strongest
-    "sitting duck" signal for a maintenance-takeover pitch."""
+    """Looks for 'Designed by X' credits and checks if the agency domain is dead."""
     agency_name = ""
     for pattern in AGENCY_FOOTER_PATTERNS:
         match = re.search(pattern, page_text or "", re.I)
@@ -67,11 +48,7 @@ def detect_abandoned_agency(page_text, footer_links, site_hostname):
         return {"found": False}
 
     external_link = next(
-        (
-            href
-            for href in footer_links
-            if hostname_of(href) and hostname_of(href) != site_hostname
-        ),
+        (href for href in footer_links if hostname_of(href) and hostname_of(href) != site_hostname),
         None,
     )
 
@@ -89,35 +66,27 @@ def detect_abandoned_agency(page_text, footer_links, site_hostname):
     }
 
 
-def _getall(result):
-    """Scrapling css()/xpath() results expose getall(); plain lists don't."""
-    if result is None:
-        return []
-    if hasattr(result, "getall"):
-        return [str(v) for v in result.getall()]
-    return [str(v) for v in result]
-
-
 def _footer_links(page):
-    links = _getall(page.css("footer a[href]::attr(href)"))
-    # [class*="footer" i] (case-insensitive flag) isn't universally
-    # supported, so approximate it with the two common casings.
-    links += _getall(page.css('[class*="footer"] a[href]::attr(href)'))
-    links += _getall(page.css('[class*="Footer"] a[href]::attr(href)'))
-    return links
+    """Native Playwright locator for footer links."""
+    links = []
+    for selector in ['footer a[href]', '[class*="footer" i] a[href]', '[class*="Footer"] a[href]']:
+        try:
+            for el in page.locator(selector).all():
+                href = el.get_attribute("href")
+                if href: links.append(href)
+        except Exception:
+            pass
+    return list(dict.fromkeys(links))
 
 
 def run_zero_cost_audit(raw_url):
-    """Runs the full $0 audit on a single URL. Returns a score (0-100), a
-    list of plain-English issues ready to paste into a pitch, and the raw
-    signals behind them so the UI can render individual check badges."""
+    """Runs the full $0 audit on a single URL."""
     url = normalize_url(raw_url)
     if not url:
         return {"hasWebsite": False, "score": 0, "issues": ["No website present"], "checks": {}}
 
     hostname = hostname_of(url)
 
-    # 1. DNS — is this even a live domain?
     if not domain_is_alive(hostname):
         return {
             "hasWebsite": False,
@@ -136,47 +105,26 @@ def run_zero_cost_audit(raw_url):
         issues.append("Missing SSL Certificate (Insecure Connection)")
 
     try:
-        # Mobile viewport + phone UA, matching the JS audit's iPhone check.
-        with DynamicSession(
-            max_pages=1,
-            headless=True,
-            disable_resources=True,
-            timeout=AUDIT_NAV_TIMEOUT_MS,
-            additional_args={"viewport": MOBILE_VIEWPORT, "user_agent": MOBILE_USER_AGENT},
-        ) as session:
-            state = {"overflow": False}
-
-            def mobile_check(page):
-                try:
-                    state["overflow"] = bool(
-                        page.evaluate(
-                            "() => document.documentElement.scrollWidth > window.innerWidth + 5"
-                        )
-                    )
-                except Exception:
-                    pass
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+            context = browser.new_context(viewport=MOBILE_VIEWPORT, user_agent=MOBILE_USER_AGENT)
+            page = context.new_page()
 
             start_time = time.monotonic()
             try:
-                page = session.fetch(
-                    url,
-                    page_action=mobile_check,
-                    timeout=AUDIT_NAV_TIMEOUT_MS,
-                    network_idle=False,
-                    wait=400,
-                )
+                response = page.goto(url, timeout=AUDIT_NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                page.wait_for_timeout(400)
             except Exception:
-                # HTTPS navigation failed outright (bad cert, refused
-                # connection, timeout) — try the plain-HTTP status as a last
-                # resort so we can still tell "slow" from "totally down".
                 fallback = raw_get(url.replace("https://", "http://"))
                 if not fallback["status"] or fallback["status"] >= 500:
+                    browser.close()
                     return {
                         "hasWebsite": True,
                         "score": 10,
                         "issues": ["Website did not respond (server error or unreachable)"],
                         "checks": {**checks, "reachable": False},
                     }
+                browser.close()
                 return {
                     "hasWebsite": True,
                     "score": 20,
@@ -185,9 +133,10 @@ def run_zero_cost_audit(raw_url):
                 }
 
             load_time_ms = (time.monotonic() - start_time) * 1000
-            http_status = page.status or 0
+            http_status = response.status if response else 0
 
             if http_status >= 400:
+                browser.close()
                 return {
                     "hasWebsite": True,
                     "score": 10,
@@ -200,25 +149,26 @@ def run_zero_cost_audit(raw_url):
                 score -= AUDIT_SCORE_WEIGHTS["slowLoad"]
                 issues.append(f"Slow Load Time ({load_time_ms / 1000:.1f}s)")
 
-            # 2. Mobile-responsive check — does the page overflow
-            # horizontally at a 375px phone width?
-            checks["mobileResponsive"] = not state["overflow"]
-            if state["overflow"]:
+            overflow = False
+            try:
+                overflow = page.evaluate("() => document.documentElement.scrollWidth > window.innerWidth + 5")
+            except Exception:
+                pass
+
+            checks["mobileResponsive"] = not overflow
+            if overflow:
                 score -= AUDIT_SCORE_WEIGHTS["noMobile"]
                 issues.append("Not Mobile-Responsive (horizontal scroll on phones)")
 
-            # 3. SEO / pixel / analytics check + footer text for the agency
-            # detector — all read from the one page we already loaded.
-            html = response_html(page)
-            page_text = page.get_all_text() or ""
+            html = page.content()
+            page_text = page.evaluate("() => document.body?.innerText || ''")
             footer_links = _footer_links(page)
 
-            title_el = page.css_first("title::text")
-            title = str(title_el.get()).strip() if title_el is not None and hasattr(title_el, "get") else ""
-            meta_el = page.css_first('meta[name="description"]::attr(content)')
-            meta_description = (
-                str(meta_el.get()).strip() if meta_el is not None and hasattr(meta_el, "get") else ""
-            )
+            title = page.title()
+            meta_el = page.locator('meta[name="description"]').first
+            meta_description = meta_el.get_attribute("content") if meta_el.count() > 0 else ""
+
+            browser.close()
 
         found_analytics = [s for s in ANALYTICS_SIGNATURES if re.search(s["pattern"], html, re.I)]
         checks["analytics"] = [s["name"] for s in found_analytics]
@@ -240,9 +190,7 @@ def run_zero_cost_audit(raw_url):
         checks["abandonedAgency"] = abandoned
         if abandoned.get("found") and abandoned.get("agencyDomainDead"):
             score -= AUDIT_SCORE_WEIGHTS["abandonedAgency"]
-            issues.append(
-                f'Abandoned Agency: built by "{abandoned["agencyName"]}", whose own domain is no longer active'
-            )
+            issues.append(f'Abandoned Agency: built by "{abandoned["agencyName"]}", whose own domain is no longer active')
 
         return {
             "hasWebsite": True,
@@ -251,9 +199,4 @@ def run_zero_cost_audit(raw_url):
             "checks": checks,
         }
     except Exception as error:
-        return {
-            "hasWebsite": True,
-            "score": 0,
-            "issues": [f"Audit failed: {error}"],
-            "checks": {},
-        }
+        return {"hasWebsite": True, "score": 0, "issues": [f"Audit failed: {error}"], "checks": {}}

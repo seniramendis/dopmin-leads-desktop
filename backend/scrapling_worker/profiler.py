@@ -1,21 +1,13 @@
-"""Full Scrapling port of client/src/main/businessProfiler.js — deep
-extraction on ONE business's own website: pricing/services, contact info,
-social links, tech stack, and an optional 1-2 competitor comparison, folded
-together with the $0 audit into one JSON object ready for the LLM pitch step.
-
-Site loads now go through Scrapling's StealthyFetcher with
-solve_cloudflare=True (handles Turnstile/Interstitial challenges natively,
-replacing the hand-rolled anti-bot retry wall) and per-attempt User-Agent
-rotation from the same pool the JS version used.
+"""Pure Playwright port of business profiling and competitor analysis.
+Scrapling has been completely removed to match the new architecture.
 """
 
 import random
 import re
 import time
+from playwright.sync_api import sync_playwright
 
-from scrapling.fetchers import StealthyFetcher
-
-from audit import detect_abandoned_agency, response_html, run_zero_cost_audit, _footer_links
+from audit import detect_abandoned_agency, run_zero_cost_audit, _footer_links
 from constants import (
     ANTI_BOT_TEXT_PATTERNS,
     EMAIL_REGEX,
@@ -33,9 +25,7 @@ _ANTI_BOT_RES = [re.compile(p, re.I) for p in ANTI_BOT_TEXT_PATTERNS]
 _EMAIL_RE = re.compile(EMAIL_REGEX)
 _IMAGE_EMAIL_RE = re.compile(r"\.(png|jpg|jpeg|gif|svg|webp)$", re.I)
 _SOCIAL_RES = {platform: re.compile(pattern, re.I) for platform, pattern in SOCIAL_DOMAIN_PATTERNS.items()}
-_TECH_RES = [
-    {"name": s["name"], "pattern": re.compile(s["pattern"], re.I)} for s in TECH_STACK_SIGNATURES
-]
+_TECH_RES = [{"name": s["name"], "pattern": re.compile(s["pattern"], re.I)} for s in TECH_STACK_SIGNATURES]
 
 
 class _BlockedError(Exception):
@@ -43,46 +33,28 @@ class _BlockedError(Exception):
 
 
 def detect_tech_stack(html):
-    """Checks raw HTML against known fingerprints; returns every match plus
-    a best-guess "platform" (the first non-generic hit)."""
     matches = [s["name"] for s in _TECH_RES if s["pattern"].search(html)]
     platform = next((name for name in matches), None) or ("HTML5 Template (static)" if html else "Unknown")
     return {"platform": platform, "signals": matches}
 
 
 def extract_contact_and_social(page, html, site_hostname):
-    """Pulls mailto/tel links and plain-text emails, plus every outbound
-    link matching a known social platform domain (deduped per platform)."""
-    links = [
-        el.attrib.get("href", "")
-        for el in page.css("a[href]")
-        if el.attrib.get("href")
-    ]
+    links = []
+    for el in page.locator("a[href]").all():
+        href = el.get_attribute("href")
+        if href: links.append(href)
 
-    emails_from_mailto = [
-        href.replace("mailto:", "").split("?")[0].strip()
-        for href in links
-        if href.startswith("mailto:")
-    ]
+    emails_from_mailto = [href.replace("mailto:", "").split("?")[0].strip() for href in links if href.startswith("mailto:")]
     emails_from_text = _EMAIL_RE.findall(html)
-    emails = [
-        e
-        for e in dict.fromkeys(emails_from_mailto + emails_from_text)
-        if not _IMAGE_EMAIL_RE.search(e)
-    ]
+    emails = [e for e in dict.fromkeys(emails_from_mailto + emails_from_text) if not _IMAGE_EMAIL_RE.search(e)]
 
-    phones = list(
-        dict.fromkeys(
-            href.replace("tel:", "").strip() for href in links if href.startswith("tel:")
-        )
-    )
+    phones = list(dict.fromkeys(href.replace("tel:", "").strip() for href in links if href.startswith("tel:")))
     phones = [p for p in phones if p]
 
     social = {}
     for href in links:
         host = hostname_of(href)
-        if not host or host == site_hostname:
-            continue
+        if not host or host == site_hostname: continue
         for platform, pattern in _SOCIAL_RES.items():
             if pattern.search(host) and platform not in social:
                 social[platform] = href
@@ -91,23 +63,14 @@ def extract_contact_and_social(page, html, site_hostname):
 
 
 def find_pricing_and_service_links(page):
-    """Checks whether the homepage links to something that looks like a
-    pricing or services page — enough signal for a pitch ("no visible
-    pricing page" is itself a talking point) without crawling the site."""
-    nav_links = [
-        {"href": el.attrib.get("href", ""), "text": (el.get_all_text(strip=True) or "").lower()}
-        for el in page.css("a[href]")
-    ]
+    nav_links = []
+    for el in page.locator("a[href]").all():
+        href = el.get_attribute("href")
+        text = el.inner_text().strip().lower() if el.inner_text() else ""
+        if href: nav_links.append({"href": href, "text": text})
 
     def match_any(keywords):
-        return next(
-            (
-                link
-                for link in nav_links
-                if any(kw in f"{link['href'].lower()} {link['text']}" for kw in keywords)
-            ),
-            None,
-        )
+        return next((link for link in nav_links if any(kw in f"{link['href'].lower()} {link['text']}" for kw in keywords)), None)
 
     pricing_link = match_any(PRICING_LINK_KEYWORDS)
     services_link = match_any(SERVICES_LINK_KEYWORDS)
@@ -122,88 +85,51 @@ def find_pricing_and_service_links(page):
 
 def _is_likely_blocked(page):
     try:
-        text = page.get_all_text() or ""
+        text = page.evaluate("() => document.body?.innerText || ''")
     except Exception:
         return False
     return any(pattern.search(text) for pattern in _ANTI_BOT_RES)
 
 
-def load_with_retries(url, on_progress):
-    """Loads one URL with anti-bot handling: StealthyFetcher with Cloudflare
-    solving enabled, User-Agent rotated per attempt, jittered backoff, and a
-    friendly error once retries are exhausted."""
+def load_with_retries(browser, url, on_progress):
     last_error = ""
     for attempt in range(MAX_PROFILE_RETRIES + 1):
         try:
-            on_progress(
-                {
-                    "phase": "profiling",
-                    "message": (
-                        f"Opening {url}…"
-                        if attempt == 0
-                        else f"Retrying ({attempt}/{MAX_PROFILE_RETRIES})…"
-                    ),
-                }
+            on_progress({"phase": "profiling", "message": f"Opening {url}…" if attempt == 0 else f"Retrying ({attempt}/{MAX_PROFILE_RETRIES})…"})
+            
+            context = browser.new_context(
+                user_agent=USER_AGENT_POOL[attempt % len(USER_AGENT_POOL)],
+                viewport={"width": 1920, "height": 1080}
             )
-            page = StealthyFetcher.fetch(
-                url,
-                headless=True,
-                network_idle=False,
-                disable_resources=True,
-                solve_cloudflare=True,
-                useragent=USER_AGENT_POOL[attempt % len(USER_AGENT_POOL)],
-                timeout=PROFILE_NAV_TIMEOUT_MS,
-                wait=400,
-            )
+            page = context.new_page()
+            page.goto(url, timeout=PROFILE_NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+            page.wait_for_timeout(400)
+            
             if _is_likely_blocked(page):
+                context.close()
                 raise _BlockedError("BLOCKED")
-            return page
+            
+            return context, page
         except _BlockedError:
             last_error = "BLOCKED"
         except Exception as error:
             last_error = str(error)
+            try: context.close() 
+            except: pass
+            
         if attempt < MAX_PROFILE_RETRIES:
             time.sleep(random.uniform(0.8, 1.5))
 
     if last_error == "BLOCKED":
-        raise RuntimeError(
-            "This site is blocking automated visits. Try again later or check it manually."
-        )
-    raise RuntimeError(
-        f"Could not load this site after {MAX_PROFILE_RETRIES + 1} attempts ({last_error or 'unknown error'})."
-    )
-
-
-def check_competitors(competitor_urls, on_progress):
-    """Runs the $0 audit + tech-stack read on 1-2 competitor URLs.
-    Failures on one competitor never kill the whole comparison."""
-    urls = [u for u in (competitor_urls or []) if u][:2]
-    results = []
-    for raw_url in urls:
-        url = normalize_url(raw_url)
-        on_progress({"phase": "profiling", "message": f"Checking competitor {url}…"})
-        try:
-            audit = run_zero_cost_audit(url)
-            tech_stack = {"platform": "Unknown", "signals": []}
-            try:
-                page = load_with_retries(url, on_progress)
-                tech_stack = detect_tech_stack(response_html(page))
-            except Exception:
-                # Tech-stack read is a bonus — the audit is useful on its own.
-                pass
-            results.append({"url": url, "success": True, **audit, "techStack": tech_stack})
-        except Exception as error:
-            results.append({"url": url, "success": False, "error": str(error)})
-    return results
+        raise RuntimeError("This site is blocking automated visits. Try again later.")
+    raise RuntimeError(f"Could not load this site after {MAX_PROFILE_RETRIES + 1} attempts ({last_error or 'unknown error'}).")
 
 
 def scrape_business_profile(raw_url, options=None, on_progress=lambda payload: None):
-    """Runs the full single-business profile: audit + pricing/services +
-    contact/social + tech stack + (optional) competitor comparison."""
     options = options or {}
     url = normalize_url(raw_url)
-    if not url:
-        return {"success": False, "error": "Please provide a business website URL."}
+    if not url: return {"success": False, "error": "Please provide a business website URL."}
+    
     hostname = hostname_of(url)
     competitor_urls = options.get("competitorUrls") or []
 
@@ -212,41 +138,52 @@ def scrape_business_profile(raw_url, options=None, on_progress=lambda payload: N
         audit = run_zero_cost_audit(url)
 
         if not audit.get("hasWebsite"):
-            return {
-                "success": True,
-                "url": url,
-                "hostname": hostname,
-                **audit,
-                "techStack": None,
-                "contact": None,
-                "competitors": [],
-            }
+            return {"success": True, "url": url, "hostname": hostname, **audit, "techStack": None, "contact": None, "competitors": []}
 
-        try:
-            page = load_with_retries(url, on_progress)
-        except Exception as error:
-            return {
-                "success": True,
-                "url": url,
-                "hostname": hostname,
-                **audit,
-                "techStackError": str(error),
-                "competitors": [],
-            }
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+            try:
+                context, page = load_with_retries(browser, url, on_progress)
+            except Exception as error:
+                browser.close()
+                return {"success": True, "url": url, "hostname": hostname, **audit, "techStackError": str(error), "competitors": []}
 
-        html = response_html(page)
-        page_text = page.get_all_text() or ""
-        footer_links = _footer_links(page)
+            html = page.content()
+            page_text = page.evaluate("() => document.body?.innerText || ''")
+            footer_links = _footer_links(page)
 
-        tech_stack = detect_tech_stack(html)
-        contact = extract_contact_and_social(page, html, hostname)
-        pricing_and_services = find_pricing_and_service_links(page)
-        abandoned_agency = detect_abandoned_agency(page_text, footer_links, hostname)
+            tech_stack = detect_tech_stack(html)
+            contact = extract_contact_and_social(page, html, hostname)
+            pricing_and_services = find_pricing_and_service_links(page)
+            abandoned_agency = detect_abandoned_agency(page_text, footer_links, hostname)
+            
+            context.close()
+            browser.close()
 
-        competitors = check_competitors(competitor_urls, on_progress) if competitor_urls else []
+        # Check competitors sequentially to avoid opening multiple heavy processes at once
+        competitors = []
+        if competitor_urls:
+            urls = [u for u in competitor_urls if u][:2]
+            for comp_url in urls:
+                c_url = normalize_url(comp_url)
+                on_progress({"phase": "profiling", "message": f"Checking competitor {c_url}…"})
+                try:
+                    c_audit = run_zero_cost_audit(c_url)
+                    c_tech = {"platform": "Unknown", "signals": []}
+                    with sync_playwright() as cp:
+                        c_browser = cp.chromium.launch(headless=True)
+                        try:
+                            c_context, c_page = load_with_retries(c_browser, c_url, lambda x: None)
+                            c_tech = detect_tech_stack(c_page.content())
+                            c_context.close()
+                        except:
+                            pass
+                        c_browser.close()
+                    competitors.append({"url": c_url, "success": True, **c_audit, "techStack": c_tech})
+                except Exception as e:
+                    competitors.append({"url": c_url, "success": False, "error": str(e)})
 
         on_progress({"phase": "done"})
-
         return {
             "success": True,
             "url": url,
