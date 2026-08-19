@@ -8,25 +8,6 @@ Two-phase design (unchanged from the JS original):
   parallel pages) and read the sidebar directly. Every listing renders the
   same sidebar, which is what makes phone numbers and website presence
   trustworthy.
-
-What changed vs the JS version — everything runs on Scrapling now:
-  * AsyncStealthySession replaces hand-rolled chromium.launch + context:
-    an anti-detect stealth browser with a persistent profile, a real
-    browser-matched User-Agent, Google referer headers, canvas-noise and
-    WebRTC-leak protections — all built in instead of hand-configured.
-  * max_pages=DETAIL_CONCURRENCY gives a managed page pool, replacing the
-    hand-written mapWithConcurrency/pool code.
-  * disable_resources=True replaces the manual route() interception that
-    blocked images/fonts/media/stylesheets.
-  * Data extraction uses Scrapling's Selector API (css/css_first/attrib/
-    get_all_text) on the returned Response instead of page.evaluate blobs.
-  * Interactive bits (consent dismissal, feed scrolling) run inside
-    Scrapling's page_action hook, which receives the underlying Playwright
-    page after navigation.
-
-NOTE: Scrapling swallows exceptions raised inside page_action (they're
-logged, not re-raised), so actions communicate back through the `state`
-dict closure instead of throwing.
 """
 
 import asyncio
@@ -58,24 +39,16 @@ RATING_RE = re.compile(r"([\d.]+)\s*star", re.I)
 REVIEWS_RE = re.compile(r"([\d,]+)\s*review", re.I)
 OPEN_STATUS_RE = re.compile(r"^(open|closed|opens|closes)\b", re.I)
 
-# Google embeds a stable per-place hex ID (CID) in every place URL's `data=`
-# blob, e.g. "!1s0x3ae2530...:0x8f1c...". Different sub-queries surface the
-# *same* business behind *different* href query strings/viewport params, so
-# deduping on the raw href (the old behavior) let duplicates through — each
-# one costing a full extra detail-page fetch. Deduping on this ID instead
-# catches those overlaps before phase 2 even starts.
 PLACE_ID_RE = re.compile(r"!1s(0x[0-9a-f]+:0x[0-9a-f]+)", re.I)
 
 
 def canonical_place_key(href):
-    """Best-effort stable key for a place URL, for de-duplication only —
-    navigation always uses the original href."""
     match = PLACE_ID_RE.search(href or "")
     if match:
         return match.group(1)
     try:
         parsed = urlparse(href)
-        return parsed.path  # fallback: drop query/viewport noise at least
+        return parsed.path  
     except Exception:
         return href
 
@@ -98,11 +71,6 @@ def classify_reputation(rating):
 
 
 def with_locale(href):
-    """Forces English on any Maps URL so the parsing logic behaves the same
-    no matter which country/city the search targets. Also guarantees the
-    URL is absolute (see the urljoin fix in _run_sub_query) — belt and
-    suspenders, since a relative URL handed to the browser for navigation
-    has no base page to resolve against and fails outright."""
     try:
         if not re.match(r"^https?://", href or "", re.I):
             href = urljoin("https://www.google.com/maps/", href or "")
@@ -114,11 +82,6 @@ def with_locale(href):
         return href
 
 
-# ---------------------------------------------------------------------------
-# Browser-side actions (run inside Scrapling's page_action hook)
-# ---------------------------------------------------------------------------
-
-
 async def _page_text(page):
     try:
         return await page.evaluate("() => document.body?.innerText || ''")
@@ -127,8 +90,6 @@ async def _page_text(page):
 
 
 async def _dismiss_consent(page):
-    """Google occasionally shows an EU/UK cookie-consent interstitial before
-    the app loads. Non-fatal when absent."""
     for selector in (
         'button:has-text("Accept all")',
         'button:has-text("I agree")',
@@ -145,11 +106,6 @@ async def _dismiss_consent(page):
 
 
 async def _discovery_action(page, state, desired, on_progress, shared=None, global_desired=None):
-    """Scrolls the Google Maps results feed until we have `desired` unique
-    place URLs, Google's own "end of the list" marker appears, or the feed
-    stops growing for several rounds in a row. Uses both a real wheel event
-    and a direct scrollTop nudge every round, since Maps' lazy loading
-    responds more reliably to genuine scroll input."""
     try:
         await page.wait_for_selector('div[role="feed"], div[role="main"]', timeout=15000)
     except Exception:
@@ -167,9 +123,6 @@ async def _discovery_action(page, state, desired, on_progress, shared=None, glob
     max_rounds = min(120, desired // 3 + 21)
 
     for _ in range(max_rounds):
-        # Other concurrently-running sub-queries may have already filled the
-        # global target while this one was still scrolling — bail out early
-        # instead of grinding through more lazy-load rounds nobody needs.
         if shared is not None and global_desired is not None and len(shared["listings"]) >= global_desired:
             break
 
@@ -217,19 +170,11 @@ async def _discovery_action(page, state, desired, on_progress, shared=None, glob
             stagnant_rounds = 0
 
         previous_count = current_count
-        # With resources disabled the feed re-renders much faster, so a
-        # short jittered wait keeps the scroll loop safe from bot detection
-        # without long idle stretches.
         await asyncio.sleep(random.uniform(0.3, 0.5))
 
 
 async def _consent_only_action(page, _state, _desired, _on_progress):
     await _dismiss_consent(page)
-
-
-# ---------------------------------------------------------------------------
-# Phase 1 — discovery
-# ---------------------------------------------------------------------------
 
 
 async def _run_sub_query(session, sub_query, index, total, desired, shared, on_progress, health):
@@ -272,7 +217,6 @@ async def _run_sub_query(session, sub_query, index, total, desired, shared, on_p
         health.record_success((time.monotonic() - nav_start) * 1000)
     except Exception as error:
         health.record_failure(str(error))
-        # One sub-query failing shouldn't kill the whole search.
         return
 
     if state["blocked"] or BLOCKED_RE.search(page.get_all_text() or ""):
@@ -281,33 +225,10 @@ async def _run_sub_query(session, sub_query, index, total, desired, shared, on_p
             return
         raise RateLimitedError()
 
-    # Parse the result cards straight off Scrapling's Response — the feed is
-    # fully scrolled by the time page_action returns, so every loaded anchor
-    # is present in the final DOM snapshot.
-    # `listings` is now a dict keyed by the canonical place ID (see
-    # canonical_place_key above) instead of a list plus a separate `seen`
-    # set — one lookup instead of two, and the key itself *is* the
-    # de-dup check, so there's no way for them to drift out of sync.
-    #
-    # anchor.attrib["href"] is the RAW href attribute as written in the
-    # HTML, not the resolved DOM property — Google's Maps feed frequently
-    # writes these relative to "/maps/" (e.g. "./place/Some+Biz/
-    # @6.83,79.86,17z/..." with no scheme/host). Handing a relative URL
-    # straight to the browser for navigation later has no base page to
-    # resolve against and fails outright — every single detail-page fetch,
-    # 100% of the time, regardless of connection speed. Resolving against
-    # "https://www.google.com/maps/" here (via urljoin) is what turns
-    # those into real, navigable absolute URLs.
     for anchor in page.css('a[href*="/maps/place/"]'):
         href = anchor.attrib.get("href")
         if not href:
             continue
-        # NOTE: base must be "https://www.google.com/maps/" (trailing
-        # slash), not the full search_url — urljoin treats the last path
-        # segment of the base as a "file" it discards, and search_url's
-        # last segment is the query text itself (e.g. ".../maps/search/
-        # hardware+stores...", no trailing slash), which would resolve
-        # "./place/..." to the wrong directory ("/maps/search/place/...").
         href = urljoin("https://www.google.com/maps/", href)
         key = canonical_place_key(href)
         if key in shared["listings"]:
@@ -316,9 +237,6 @@ async def _run_sub_query(session, sub_query, index, total, desired, shared, on_p
 
 
 async def discover_listings(session, sub_queries, desired, on_progress, health, shared=None):
-    """Runs discovery across every sub-query, deduping by canonical place
-    key, stopping as soon as `desired` unique listings are found (or every
-    sub-query ran)."""
     if shared is None:
         shared = {
             "listings": {},
@@ -345,21 +263,22 @@ async def discover_listings(session, sub_queries, desired, on_progress, health, 
     return shared
 
 
-# ---------------------------------------------------------------------------
-# Phase 2 — detail extraction (parsed with Scrapling's Selector API)
-# ---------------------------------------------------------------------------
-
-
 def _text(selector):
-    return (selector.get_all_text(strip=True) or "") if selector is not None else ""
+    """Safely extracts text, bypassing Scrapling/selectolax API quirks."""
+    if selector is None:
+        return ""
+    try:
+        return selector.get_all_text(strip=True) or ""
+    except AttributeError:
+        try:
+            return selector.text(strip=True) or ""
+        except Exception:
+            return ""
 
 
 def parse_detail(page, listing):
-    """Reads one place's detail sidebar off the Scrapling Response."""
     name = _text(page.css_first("h1"))
 
-    # Phone: Google renders a dedicated button whose data-item-id always
-    # starts with "phone:tel:" — stable for years even as class names churn.
     phone = ""
     phone_btn = page.css_first('button[data-item-id^="phone:tel:"]') or page.css_first(
         'a[href^="tel:"]'
@@ -373,8 +292,6 @@ def parse_detail(page, listing):
             or href.replace("tel:", "").strip()
         )
 
-    # Website: data-item-id "authority" is Google's stable hook for the
-    # official website link on a place page.
     website_el = page.css_first('a[data-item-id="authority"]')
     website = website_el.attrib.get("href", "") if website_el is not None else ""
 
@@ -389,13 +306,11 @@ def parse_detail(page, listing):
 
     open_status = ""
     for span in page.css("span"):
-        text = (span.text or "").strip()
+        text = _text(span)
         if OPEN_STATUS_RE.match(text):
             open_status = text
             break
 
-    # "X.X stars, N reviews"-style aria-label near the title — far more
-    # stable across Google's UI churn than star icons or class names.
     rating = None
     review_count = 0
     for span in page.css("span[aria-label]"):
@@ -433,30 +348,46 @@ async def extract_detail(session, listing, health, counters):
                 "error": "Connection lost",
             }
 
-        # Only the *first* attempt waits strictly for "h1" — Google's detail
-        # sidebar usually renders it almost immediately, so this is cheap
-        # when things are working. But on a slow connection, requiring it
-        # was turning "the page took 26s instead of 8s" into a hard failure
-        # for every single listing, even though the sidebar (phone/address/
-        # website) had actually loaded by the time we gave up waiting.
-        # Retries drop the strict wait_selector and just give the page a
-        # fixed, more generous settle time instead, so a slow-but-working
-        # connection still comes back with real data instead of nothing.
-        use_strict_wait = attempt == 0
-
         try:
             nav_start = time.monotonic()
 
-            async def action(page):
-                await _dismiss_consent(page)
+            async def action(p):
+                await _dismiss_consent(p)
+                
+                # Wait for the h1 to confirm the page has started loading
+                try:
+                    await p.wait_for_selector("h1", timeout=15000)
+                except Exception:
+                    pass
+                
+                # CRITICAL FIX: The Snapshot Race Condition.
+                # Force Playwright to wait until the AJAX calls inject the data buttons (phone/website/address)
+                # before allowing Scrapling to take the HTML snapshot.
+                try:
+                    for _ in range(20): # Poll for up to 10 seconds
+                        is_hydrated = await p.evaluate('''() => {
+                            const hasAddress = !!document.querySelector('button[data-item-id="address"]');
+                            const hasPhone = !!document.querySelector('button[data-item-id^="phone:tel:"]') || !!document.querySelector('a[href^="tel:"]');
+                            const hasWebsite = !!document.querySelector('a[data-item-id="authority"]');
+                            const hasCategory = !!document.querySelector('button[jsaction*="category"]');
+                            
+                            // Return true if at least one piece of core metadata has rendered
+                            return hasAddress || hasPhone || hasWebsite || hasCategory;
+                        }''')
+                        
+                        if is_hydrated:
+                            await p.wait_for_timeout(1000) # Give React 1 more second to finish appending classes
+                            return
+                        await p.wait_for_timeout(500)
+                except Exception:
+                    pass
 
             page = await session.fetch(
                 with_locale(listing["href"]),
                 page_action=action,
-                wait_selector="h1" if use_strict_wait else None,
-                timeout=NAV_TIMEOUT_MS,
+                timeout=45000, # Increased to 45s for safe buffer
                 network_idle=False,
-                wait=250 if use_strict_wait else 1500,
+                wait=1000, # Give Scrapling 1 final second before snapping
             )
             health.record_success((time.monotonic() - nav_start) * 1000)
 
@@ -465,11 +396,6 @@ async def extract_detail(session, listing, health, counters):
 
             detail = parse_detail(page, listing)
 
-            # A page that loaded but genuinely has nothing usable on it
-            # (no name, no address, no phone, no website) usually means we
-            # landed somewhere other than a business's detail sidebar —
-            # worth one more attempt rather than quietly returning an
-            # empty lead.
             has_any_detail = bool(
                 detail["name"] or detail["address"] or detail["phone"] or detail["website"]
             )
@@ -477,7 +403,7 @@ async def extract_detail(session, listing, health, counters):
                 last_error = "Detail page loaded but no business info was found"
                 attempt += 1
                 counters["retries"] += 1
-                await asyncio.sleep(random.uniform(0.4, 0.8))
+                await asyncio.sleep(random.uniform(1.0, 2.0))
                 continue
 
             return {
@@ -501,7 +427,7 @@ async def extract_detail(session, listing, health, counters):
             if health.aborted:
                 break
             if attempt <= MAX_DETAIL_RETRIES:
-                await asyncio.sleep(random.uniform(0.4, 0.8))
+                await asyncio.sleep(random.uniform(1.0, 2.0))
 
     return {
         "success": False,
@@ -512,11 +438,8 @@ async def extract_detail(session, listing, health, counters):
 
 
 async def run_detail_pool(session, listings, on_progress, health):
-    """Reads every listing's detail page through the session's page pool.
-    The pool (max_pages=DETAIL_CONCURRENCY) is the real throttle; the
-    semaphore mirrors the old JS pool's back-pressure so progress events
-    stay ordered and retries don't stampede."""
-    semaphore = asyncio.Semaphore(DETAIL_CONCURRENCY)
+    # CRITICAL: Limit concurrency to 3
+    semaphore = asyncio.Semaphore(3)
     counters = {"retries": 0, "completed": 0}
     total = len(listings)
 
@@ -524,6 +447,10 @@ async def run_detail_pool(session, listings, on_progress, health):
         async with semaphore:
             if health.aborted:
                 return None
+            
+            # CRITICAL: Jitter to avoid bot detection
+            await asyncio.sleep(random.uniform(1.0, 2.5))
+            
             result = await extract_detail(session, listing, health, counters)
             counters["completed"] += 1
             on_progress(
@@ -534,44 +461,10 @@ async def run_detail_pool(session, listings, on_progress, health):
                     "retries": counters["retries"],
                 }
             )
-            await asyncio.sleep(random.uniform(0.05, 0.12))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
             return result
 
     return await asyncio.gather(*(worker(listing) for listing in listings))
-
-
-# ---------------------------------------------------------------------------
-# Result shaping (identical to the JS toLead())
-# ---------------------------------------------------------------------------
-
-
-def to_lead(raw, index):
-    rating = raw["rating"] if isinstance(raw.get("rating"), (int, float)) else None
-    reputation = classify_reputation(rating)
-    has_rating = rating is not None
-
-    return {
-        "id": f"{int(time.time() * 1000)}-{index}",
-        "name": raw["name"],
-        "phone": raw.get("phone") or "No phone listed",
-        "address": raw.get("address") or "",
-        "category": raw.get("category") or "",
-        "openStatus": raw.get("openStatus") or "",
-        "status": "Has Website" if raw["hasWebsite"] else "No Website Found",
-        "hasWebsite": raw["hasWebsite"],
-        "website": raw.get("website") or "",
-        "rating": rating,
-        "reviewCount": raw.get("reviewCount", 0),
-        "reputation": reputation,
-        "isHotLead": (not raw["hasWebsite"]) and has_rating and rating >= REPUTATION_THRESHOLDS["good"],
-        "isReputationRisk": (not raw["hasWebsite"]) and has_rating and rating < 3.5,
-        "mapsUrl": raw["href"],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 
 async def scrape_leads(query, max_results=20, options=None, on_progress=lambda payload: None):
@@ -579,10 +472,6 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
     desired = max(1, min(500, int(max_results or 20)))
     sub_queries = expand_query(query, options.get("mode", ""))
 
-    # Fail fast with no connection instead of watching every navigation
-    # time out one by one — and actually measure latency instead of just
-    # confirming DNS resolves, so "your connection looks slow" (if it shows
-    # up later) is backed by a real number instead of a guess.
     on_progress({"phase": "searching", "message": "Checking your internet connection…"})
     connection = await measure_connection_quality()
     if not connection["reachable"]:
@@ -606,28 +495,21 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
     )
 
     try:
-        # One stealth session for the whole run: persistent profile (consent
-        # dismissed once stays dismissed), page pool = detail concurrency,
-        # heavy resources dropped session-wide for speed.
         async with AsyncStealthySession(
-            max_pages=DETAIL_CONCURRENCY,
+            max_pages=3, 
             headless=True,
-            disable_resources=True,
-            google_search=True,
+            disable_resources=False, 
+            google_search=False, # CRITICAL: True alters Google's internal APIs
             hide_canvas=True,
             block_webrtc=True,
             locale="en-US",
-            timeout=NAV_TIMEOUT_MS,
+            timeout=45000, 
         ) as session:
             shared = await discover_listings(session, sub_queries, desired, on_progress, health)
             listings = list(shared["listings"].values())
             is_expanded = shared["is_expanded"]
             rate_limited = shared["rate_limited"]
 
-            # The user's own query ("hardware stores in Mount Lavinia")
-            # wasn't fanned out above — but if it came back thin, broaden it
-            # with the same category fan-out bare place names get, anchored
-            # to the same place.
             queries_used = list(sub_queries)
             if not is_expanded and len(listings) < desired and not rate_limited and not health.aborted:
                 broader_queries = broaden_query(sub_queries[0], sub_queries)
