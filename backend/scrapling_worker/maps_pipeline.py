@@ -335,6 +335,33 @@ def parse_detail(page, listing):
     }
 
 
+def to_lead(raw, index):
+    """Shape a successful extract_detail() result into the lead dict the
+    Electron UI/db.js consumes (see client/src/renderer/src/components/
+    ResultsTable.svelte and client/src/main/db.js for the required fields).
+
+    This was previously referenced in scrape_leads() but never defined,
+    which threw a NameError right after extraction finished — the scrape
+    would silently report {"success": False}, and the app screen would
+    stay blank even though discovery/extraction had completed fine.
+    """
+    href = raw.get("href", "")
+    rating = raw.get("rating")
+    return {
+        "id": canonical_place_key(href) or f"lead-{index}",
+        "name": raw.get("name") or "Unnamed business",
+        "category": raw.get("category") or "",
+        "phone": raw.get("phone") or "",
+        "address": raw.get("address") or "",
+        "mapsUrl": href,
+        "rating": rating,
+        "reviewCount": raw.get("reviewCount") or 0,
+        "hasWebsite": bool(raw.get("hasWebsite")),
+        "website": raw.get("website") or "",
+        "reputation": classify_reputation(rating),
+    }
+
+
 async def extract_detail(session, listing, health, counters):
     attempt = 0
     last_error = ""
@@ -350,37 +377,39 @@ async def extract_detail(session, listing, health, counters):
 
         try:
             nav_start = time.monotonic()
+            state = {"action_error": None}
 
-            async def action(p):
+            async def action(p, state=state):
                 await _dismiss_consent(p)
-                
-                # Wait for the h1 to confirm the page has started loading
-                try:
-                    await p.wait_for_selector("h1", timeout=15000)
-                except Exception:
-                    pass
-                
+
                 # CRITICAL FIX: The Snapshot Race Condition.
-                # Force Playwright to wait until the AJAX calls inject the data buttons (phone/website/address)
-                # before allowing Scrapling to take the HTML snapshot.
+                # Instead of a hand-rolled page.evaluate() polling loop (whose
+                # exceptions Scrapling silently swallows, causing premature blank
+                # snapshots), block on Playwright's own native DOM waiter. It
+                # resolves the instant ANY of the core sidebar elements attaches
+                # to the DOM, and raises a real, catchable TimeoutError otherwise.
+                sidebar_selector = (
+                    'button[data-item-id="address"], '
+                    'button[data-item-id^="phone:tel:"], '
+                    'a[href^="tel:"], '
+                    'a[data-item-id="authority"]'
+                )
                 try:
-                    for _ in range(20): # Poll for up to 10 seconds
-                        is_hydrated = await p.evaluate('''() => {
-                            const hasAddress = !!document.querySelector('button[data-item-id="address"]');
-                            const hasPhone = !!document.querySelector('button[data-item-id^="phone:tel:"]') || !!document.querySelector('a[href^="tel:"]');
-                            const hasWebsite = !!document.querySelector('a[data-item-id="authority"]');
-                            const hasCategory = !!document.querySelector('button[jsaction*="category"]');
-                            
-                            // Return true if at least one piece of core metadata has rendered
-                            return hasAddress || hasPhone || hasWebsite || hasCategory;
-                        }''')
-                        
-                        if is_hydrated:
-                            await p.wait_for_timeout(1000) # Give React 1 more second to finish appending classes
-                            return
-                        await p.wait_for_timeout(500)
-                except Exception:
-                    pass
+                    await p.wait_for_selector(
+                        sidebar_selector,
+                        timeout=15000,  # generous timeout for slow proxies
+                        state="attached",
+                    )
+                    # Small settle delay so React finishes appending classes/
+                    # sibling nodes right after the first match lands.
+                    await p.wait_for_timeout(500)
+                except Exception as e:
+                    # Scrapling swallows exceptions raised inside page_action, so
+                    # raising here would vanish silently and still produce a
+                    # blank snapshot. Stash the error on the shared state dict
+                    # instead, and re-raise it explicitly after session.fetch()
+                    # returns, once we're back in real Python control flow.
+                    state["action_error"] = str(e)
 
             page = await session.fetch(
                 with_locale(listing["href"]),
@@ -390,6 +419,14 @@ async def extract_detail(session, listing, health, counters):
                 wait=1000, # Give Scrapling 1 final second before snapping
             )
             health.record_success((time.monotonic() - nav_start) * 1000)
+
+            if state.get("action_error"):
+                # The sidebar never hydrated in time (or Playwright hit a real
+                # DOM/navigation error) — surface it instead of silently
+                # falling through to parse a blank page.
+                raise RuntimeError(
+                    f"Sidebar failed to hydrate before snapshot: {state['action_error']}"
+                )
 
             if BLOCKED_RE.search(page.get_all_text() or ""):
                 raise RuntimeError("Rate limited by Google Maps")
