@@ -157,6 +157,23 @@ PRICING_LINK_KEYWORDS = ["pricing", "plans", "packages", "rates", "cost"]
 SERVICES_LINK_KEYWORDS = ["services", "what-we-do", "solutions", "offerings", "products"]
 
 # ---------------------------------------------------------------------------
+# LLM Extraction (llm_extractor.py) — Phase 2
+# ---------------------------------------------------------------------------
+# Mirrors client/src/main/constants.js's GEMINI_API_BASE / GEMINI_MODEL so
+# the Python worker and the JS pitch/analyst callers hit the same endpoint.
+# Update both places together if Google ships a newer default free-tier
+# model.
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_MODEL = "gemini-2.0-flash"
+
+LLM_EXTRACTION_TIMEOUT_MS = 20_000
+
+# Rough character budget per section (page text, then links) sent in the
+# prompt — keeps the request well inside Gemini Flash's context window and
+# the free-tier per-request cost predictable even on very long pages.
+MAX_LLM_PAYLOAD_CHARS = 12_000
+
+# ---------------------------------------------------------------------------
 # Query expansion (query_expansion.py)
 # ---------------------------------------------------------------------------
 

@@ -29,10 +29,19 @@ from constants import (
 )
 from netutil import (
     NetworkHealth,
-    is_network_error,
+    is_offline_error,
+    is_stall_error,
     measure_connection_quality,
 )
 from query_expansion import expand_query, broaden_query
+
+async def block_maps_resources(route):
+    """Blocks heavy media but allows Maps SPA to hydrate (keeps stylesheets/scripts)."""
+    if route.request.resource_type() in ("image", "media", "font"):
+        await route.abort()
+    else:
+        await route.continue_()
+
 
 BLOCKED_RE = re.compile(r"unusual traffic|automated queries|our systems have detected", re.I)
 RATING_RE = re.compile(r"([\d.]+)\s*star", re.I)
@@ -124,6 +133,7 @@ async def _run_sub_query(browser, sub_query, index, total, desired, shared, on_p
     )
 
     context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+    await context.route("**/*", block_maps_resources)
     page = await context.new_page()
     
     try:
@@ -240,6 +250,7 @@ async def extract_detail(browser, listing, health, counters):
             return {"success": False, "href": listing["href"], "quickName": listing["quickName"], "error": "Connection lost"}
 
         context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+        await context.route("**/*", block_maps_resources)
         page = await context.new_page()
 
         try:
@@ -385,6 +396,20 @@ def to_lead(raw, index):
     }
 
 
+def _abort_result(health):
+    """Builds the error result from whatever NetworkHealth actually recorded,
+    instead of a single hardcoded "Connection dropped mid-search" string
+    that used to fire for plain navigation timeouts (Google throttling an
+    automated browser, local CPU contention) exactly the same as a real
+    dropped connection. errorType now reflects which one actually
+    happened."""
+    return {
+        "success": False,
+        "error": health.abort_message or "The search stopped unexpectedly. Please try again.",
+        "errorType": health.abort_reason or "offline",
+    }
+
+
 async def scrape_leads(query, max_results=20, options=None, on_progress=lambda payload: None):
     options = options or {}
     desired = max(1, min(500, int(max_results or 20)))
@@ -427,7 +452,7 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
                     is_expanded = True
                     queries_used = sub_queries + broader_queries
 
-            if health.aborted: return {"success": False, "error": "Connection dropped mid-search.", "errorType": "offline"}
+            if health.aborted: return _abort_result(health)
             if not listings: return {"success": True, "leads": [], "requested": desired, "totalFound": 0, "truncated": False, "failedCount": 0, "expanded": is_expanded, "queriesUsed": queries_used}
 
             target_listings = listings[:desired]
@@ -435,7 +460,7 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
 
             detail_results = await run_detail_pool(browser, target_listings, on_progress, health)
 
-            if health.aborted: return {"success": False, "error": "Connection dropped mid-search.", "errorType": "offline"}
+            if health.aborted: return _abort_result(health)
 
             attempted = [r for r in detail_results if r]
             succeeded = [r for r in attempted if r.get("success")]
@@ -459,6 +484,16 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
     except RateLimitedError as error:
         return {"success": False, "error": str(error)}
     except Exception as error:
-        if is_network_error(str(error)):
-            return {"success": False, "error": "Connection dropped mid-search.", "errorType": "offline"}
-        return {"success": False, "error": str(error)}
+        message = str(error)
+        if is_offline_error(message):
+            return {"success": False, "error": "Lost the internet connection. Please check your connection and try again.", "errorType": "offline"}
+        if is_stall_error(message):
+            return {
+                "success": False,
+                "error": (
+                    "Google Maps stopped responding to page loads. This usually means Google is temporarily "
+                    "rate-limiting automated searches, not a dropped connection — wait a few minutes and try again."
+                ),
+                "errorType": "stalled",
+            }
+        return {"success": False, "error": message}

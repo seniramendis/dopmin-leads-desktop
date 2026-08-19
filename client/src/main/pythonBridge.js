@@ -32,14 +32,25 @@ function pythonExecutable() {
  * Spawns one Python worker and resolves with its result payload.
  * Never rejects for handled failures — workers report those as
  * { success: false, error } results, same as the old JS API.
+ *
+ * @param {string} scriptName
+ * @param {string[]} args
+ * @param {(payload: object) => void} [onProgress]
+ * @param {Record<string, string>} [extraEnv] Extra env vars layered on top
+ *   of process.env for this one worker — e.g. profile_cli.py's embedded
+ *   Gemini key (see scraper.js's scrapeSingleBusiness), which lives in the
+ *   JS bundle via secureStore.js and has no other way to reach the Python
+ *   child process.
  */
-export function runPythonWorker(scriptName, args, onProgress) {
+export function runPythonWorker(scriptName, args, onProgress, extraEnv = {}) {
   return new Promise((resolve) => {
     const scriptPath = path.join(WORKER_DIR, scriptName)
 
     let child
     try {
-      child = spawn(pythonExecutable(), [scriptPath, ...args], { env: process.env })
+      child = spawn(pythonExecutable(), [scriptPath, ...args], {
+        env: { ...process.env, ...extraEnv }
+      })
     } catch (error) {
       return resolve({
         success: false,

@@ -20,6 +20,16 @@ from constants import (
 from netutil import domain_is_alive, hostname_of, normalize_url
 
 
+def block_heavy_resources(route):
+    """Blocks media/fonts/websockets — but NOT stylesheets. The mobile-responsiveness
+    check below (scrollWidth vs innerWidth) needs real CSS layout to be meaningful;
+    blocking stylesheets here would make every site falsely read as 'responsive'."""
+    if route.request.resource_type() in ("image", "media", "font", "websocket"):
+        route.abort()
+    else:
+        route.continue_()
+
+
 def raw_get(target_url, timeout_ms=AUDIT_HTTP_TIMEOUT_MS):
     """Status-only GET — used for the plain-HTTP fallback."""
     try:
@@ -108,6 +118,7 @@ def run_zero_cost_audit(raw_url):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
             context = browser.new_context(viewport=MOBILE_VIEWPORT, user_agent=MOBILE_USER_AGENT)
+            context.route("**/*", block_heavy_resources)
             page = context.new_page()
 
             start_time = time.monotonic()

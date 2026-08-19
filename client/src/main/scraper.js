@@ -19,6 +19,7 @@
 import { spawn } from 'child_process'
 import path from 'path'
 import { runPythonWorker } from './pythonBridge'
+import { getApiKey } from './secureStore'
 
 /**
  * Google Maps lead search. Same signature and result shape as before the
@@ -39,12 +40,20 @@ export async function scrapeLeads(query, maxResults = 20, onProgress, options = 
  * Single-business deep profile (pricing/services, contact/social, tech
  * stack, optional competitor comparison, folded-in $0 audit). Same
  * signature and result shape as the old businessProfiler.js export.
+ *
+ * profile_cli.py's Phase 2 LLM extraction (llm_extractor.py) needs the
+ * embedded Gemini key, which lives in secureStore.js on this side, not
+ * anywhere the Python child process can read it directly — so it's passed
+ * through as an env var on the spawn call. If the key is empty (no
+ * embedded key baked into this build), profiler.py just falls back to its
+ * regex parsers, so this is safe to pass unconditionally.
  */
 export async function scrapeSingleBusiness(url, options = {}, onProgress) {
   return runPythonWorker(
     'profile_cli.py',
     [String(url || ''), JSON.stringify(options.competitorUrls || [])],
-    onProgress
+    onProgress,
+    { DOPMIN_GEMINI_API_KEY: getApiKey('gemini') }
   )
 }
 

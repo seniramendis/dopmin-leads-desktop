@@ -11,27 +11,49 @@ import re
 import socket
 import time
 
-NETWORK_ERROR_PATTERN = re.compile(
+OFFLINE_ERROR_PATTERN = re.compile(
     r"ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_NETWORK_IO_SUSPENDED|"
     r"ERR_CONNECTION_TIMED_OUT|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|"
     r"ERR_CONNECTION_REFUSED|ERR_NAME_NOT_RESOLVED|ERR_ADDRESS_UNREACHABLE|"
     r"ERR_TIMED_OUT|net::ERR_|Temporary failure in name resolution|"
-    r"Name or service not known|getaddrinfo failed|"
-    # Playwright/Scrapling's own navigation & wait_selector timeouts don't
-    # carry a net::ERR_ code — they read like "Timeout 30000ms exceeded"
-    # or "...waiting for selector \"h1\" to be visible". These were
-    # previously invisible to NetworkHealth entirely: record_failure()
-    # silently no-op'd on them, so a genuinely bad connection just kept
-    # retrying every single listing to exhaustion without ever tripping
-    # the "connection lost" warning the user needed to see.
+    r"Name or service not known|getaddrinfo failed",
+    re.IGNORECASE,
+)
+
+# Playwright/Scrapling's own navigation & wait_selector timeouts don't carry
+# a net::ERR_ code — they read like "Timeout 30000ms exceeded" or "...waiting
+# for selector \"h1\" to be visible". These do NOT mean the internet
+# connection dropped: the far more common cause is Google Maps soft-blocking
+# or slow-loading the page for an automated browser, or local CPU
+# contention from concurrent tabs, while the actual TCP connection is fine.
+# Tracked separately from OFFLINE_ERROR_PATTERN so NetworkHealth can report
+# an accurate cause instead of always saying "your internet dropped."
+STALL_ERROR_PATTERN = re.compile(
     r"Timeout \d+ms exceeded|Timeout exceeded while waiting|"
     r"waiting for (selector|navigation|event)",
     re.IGNORECASE,
 )
 
 
+def is_offline_error(message=""):
+    """True only for errors that indicate an actual dropped/unreachable
+    connection (DNS failure, connection refused/reset, etc.) — not a plain
+    navigation timeout."""
+    return bool(OFFLINE_ERROR_PATTERN.search(str(message)))
+
+
+def is_stall_error(message=""):
+    """True for Playwright navigation/selector timeouts with no net::ERR_
+    code — usually Google soft-blocking/throttling an automated browser or
+    local resource contention, not a dropped connection."""
+    return bool(STALL_ERROR_PATTERN.search(str(message)))
+
+
 def is_network_error(message=""):
-    return bool(NETWORK_ERROR_PATTERN.search(str(message)))
+    """True for either category — kept for callers (e.g. maps_pipeline.py's
+    catch-all exception handler) that just need "was this network/timeout
+    related at all", not which kind."""
+    return is_offline_error(message) or is_stall_error(message)
 
 
 async def check_internet_connection(timeout=5.0):
@@ -165,6 +187,14 @@ class NetworkHealth:
         self.consecutive_slow = 0
         self.aborted = False
         self._warned_slow = False
+        # Set when aborted=True — the real reason, for both the UI message
+        # and the raw last exception (useful in stderr/logs even though the
+        # UI doesn't currently surface it) so "aborted" always comes with an
+        # accurate, specific explanation instead of a single hardcoded
+        # string that assumed every abort was a dropped connection.
+        self.abort_reason = None  # "offline" | "stalled"
+        self.abort_message = None
+        self.last_error_detail = None
 
     def record_success(self, nav_ms):
         self.consecutive_failures = 0
@@ -189,15 +219,37 @@ class NetworkHealth:
                 )
 
     def record_failure(self, message):
-        if not is_network_error(message):
+        offline = is_offline_error(message)
+        stalled = is_stall_error(message)
+        if not offline and not stalled:
             return
+
+        self.last_error_detail = str(message)
         self.consecutive_failures += 1
         if self.consecutive_failures >= self.max_consecutive_failures and not self.aborted:
             self.aborted = True
+
+            if offline:
+                self.abort_reason = "offline"
+                self.abort_message = "Lost the internet connection. Stopping the search — please try again."
+            else:
+                # Repeated bare navigation/selector timeouts with no actual
+                # net::ERR_ code almost always mean Google is throttling or
+                # soft-blocking the automated browser (or the machine is
+                # too loaded to keep up), not that the internet dropped —
+                # so say that instead of blaming the connection.
+                self.abort_reason = "stalled"
+                self.abort_message = (
+                    "Google Maps stopped responding to repeated page loads. This usually means Google is "
+                    "temporarily rate-limiting or slowing down automated searches, not a dropped connection "
+                    "— wait a few minutes and try again, or try a smaller result count."
+                )
+
             if self.on_progress:
                 self.on_progress(
                     {
                         "phase": "connection-lost",
-                        "message": "Lost the internet connection. Stopping the search — please try again.",
+                        "message": self.abort_message,
+                        "reason": self.abort_reason,
                     }
                 )

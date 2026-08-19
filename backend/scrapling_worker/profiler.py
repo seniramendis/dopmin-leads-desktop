@@ -2,6 +2,7 @@
 Scrapling has been completely removed to match the new architecture.
 """
 
+import os
 import random
 import re
 import time
@@ -19,7 +20,25 @@ from constants import (
     TECH_STACK_SIGNATURES,
     USER_AGENT_POOL,
 )
-from netutil import hostname_of, normalize_url
+from llm_extractor import LLMExtractionError, extract_with_llm
+from netutil import domain_is_alive, hostname_of, normalize_url
+
+# Set by scraper.js -> pythonBridge.js when spawning profile_cli.py, mirrors
+# the same embedded key secureStore.js hands to pitchGenerator.js /
+# analystEngine.js on the JS side. Read once at import time; if it's absent
+# (Ollama-only install, or the embedded key was never set) extract_structured_data()
+# below falls straight through to the regex parsers.
+GEMINI_API_KEY = os.environ.get("DOPMIN_GEMINI_API_KEY", "")
+
+def block_heavy_resources(route):
+    """Blocks images/media/fonts/websockets/stylesheets for pure text extraction.
+    Safe here because profiler.py never checks visual layout — only DOM text,
+    href links, and raw-HTML regex signatures."""
+    if route.request.resource_type() in ("image", "media", "font", "stylesheet", "websocket"):
+        route.abort()
+    else:
+        route.continue_()
+
 
 _ANTI_BOT_RES = [re.compile(p, re.I) for p in ANTI_BOT_TEXT_PATTERNS]
 _EMAIL_RE = re.compile(EMAIL_REGEX)
@@ -83,6 +102,89 @@ def find_pricing_and_service_links(page):
     }
 
 
+def _gather_nav_links(page):
+    """Every <a href> on the page as {href, text} — gathered once and shared
+    between the LLM prompt and the regex fallback so both paths see the
+    same link set instead of re-querying the DOM twice."""
+    links = []
+    for el in page.locator("a[href]").all():
+        href = el.get_attribute("href")
+        if not href:
+            continue
+        text = el.inner_text().strip() if el.inner_text() else ""
+        links.append({"href": href, "text": text})
+    return links
+
+
+def extract_structured_data(page, html, page_text, footer_links, site_hostname, on_progress=lambda payload: None):
+    """Contact/social/pricing-services/abandoned-agency in one pass.
+
+    Phase 2: tries the LLM extractor (llm_extractor.py, Gemini) first. On
+    ANY failure — no API key configured, network error, rate limit,
+    malformed JSON — falls straight back to the original regex parsers, so
+    a Gemini outage or missing key never breaks a profile, it just makes
+    this one less AI-assisted. `extractionMethod` in the result tells the
+    caller which path actually ran.
+    """
+    nav_links = _gather_nav_links(page)
+
+    if GEMINI_API_KEY:
+        try:
+            llm_result = extract_with_llm(page_text, nav_links, site_hostname, GEMINI_API_KEY)
+
+            agency = llm_result["abandonedAgency"]
+            if agency["found"]:
+                agency_domain = agency["agencyDomain"]
+                abandoned_agency = {
+                    "found": True,
+                    "agencyName": agency["agencyName"] or agency_domain or "a previous agency",
+                    "agencyDomain": agency_domain,
+                    # Domain aliveness is a real DNS check the LLM has no way
+                    # to perform from page text alone — always verified here
+                    # in code, never trusted straight from the model.
+                    "agencyDomainDead": (not domain_is_alive(agency_domain)) if agency_domain else False,
+                }
+            else:
+                abandoned_agency = {"found": False}
+
+            return {
+                "contact": {
+                    "emails": llm_result["emails"],
+                    "phones": llm_result["phones"],
+                    "social": llm_result["social"],
+                },
+                "pricingAndServices": {
+                    "hasPricingPage": llm_result["hasPricingPage"],
+                    "pricingUrl": llm_result["pricingUrl"],
+                    "hasServicesPage": llm_result["hasServicesPage"],
+                    "servicesUrl": llm_result["servicesUrl"],
+                },
+                "abandonedAgency": abandoned_agency,
+                "extractionMethod": "llm",
+            }
+        except LLMExtractionError as error:
+            on_progress({
+                "phase": "profiling",
+                "message": f"AI extraction unavailable ({error}) — falling back to pattern matching…",
+            })
+        except Exception as error:
+            on_progress({
+                "phase": "profiling",
+                "message": f"AI extraction failed ({error}) — falling back to pattern matching…",
+            })
+
+    contact = extract_contact_and_social(page, html, site_hostname)
+    pricing_and_services = find_pricing_and_service_links(page)
+    abandoned_agency = detect_abandoned_agency(page_text, footer_links, site_hostname)
+
+    return {
+        "contact": contact,
+        "pricingAndServices": pricing_and_services,
+        "abandonedAgency": abandoned_agency,
+        "extractionMethod": "regex",
+    }
+
+
 def _is_likely_blocked(page):
     try:
         text = page.evaluate("() => document.body?.innerText || ''")
@@ -101,6 +203,7 @@ def load_with_retries(browser, url, on_progress):
                 user_agent=USER_AGENT_POOL[attempt % len(USER_AGENT_POOL)],
                 viewport={"width": 1920, "height": 1080}
             )
+            context.route("**/*", block_heavy_resources)
             page = context.new_page()
             page.goto(url, timeout=PROFILE_NAV_TIMEOUT_MS, wait_until="domcontentloaded")
             page.wait_for_timeout(400)
@@ -153,9 +256,11 @@ def scrape_business_profile(raw_url, options=None, on_progress=lambda payload: N
             footer_links = _footer_links(page)
 
             tech_stack = detect_tech_stack(html)
-            contact = extract_contact_and_social(page, html, hostname)
-            pricing_and_services = find_pricing_and_service_links(page)
-            abandoned_agency = detect_abandoned_agency(page_text, footer_links, hostname)
+            extracted = extract_structured_data(page, html, page_text, footer_links, hostname, on_progress)
+            contact = extracted["contact"]
+            pricing_and_services = extracted["pricingAndServices"]
+            abandoned_agency = extracted["abandonedAgency"]
+            extraction_method = extracted["extractionMethod"]
             
             context.close()
             browser.close()
@@ -193,6 +298,7 @@ def scrape_business_profile(raw_url, options=None, on_progress=lambda payload: N
             "contact": contact,
             **pricing_and_services,
             "abandonedAgency": abandoned_agency,
+            "extractionMethod": extraction_method,
             "competitors": competitors,
         }
     except Exception as error:
