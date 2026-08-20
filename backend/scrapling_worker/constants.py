@@ -36,12 +36,16 @@ def _cpu_scaled(per_core, floor, ceiling, env_var):
 # CPU/RAM footprint low enough to support several in parallel, but it's still
 # a real Chromium process per tab — scaled to cores, not a flat number, so it
 # doesn't overrun weaker machines. Override with DOPMIN_DETAIL_CONCURRENCY.
-DETAIL_CONCURRENCY = _cpu_scaled(per_core=2.5, floor=4, ceiling=14, env_var="DOPMIN_DETAIL_CONCURRENCY")
+# NOTE: lowered from the old 2.5/14 ceiling — that many simultaneous Maps
+# navigations from a single IP with no proxy is what was tripping Google's
+# soft-block ("stopped responding to repeated page loads") in the first
+# place. Gentler concurrency is slower but far less likely to get throttled.
+DETAIL_CONCURRENCY = _cpu_scaled(per_core=1.5, floor=3, ceiling=8, env_var="DOPMIN_DETAIL_CONCURRENCY")
 
 # How many category sub-queries run at once during discovery. Kept at or
 # below DETAIL_CONCURRENCY since both draw from the same browser page pool.
 # Override with DOPMIN_DISCOVERY_CONCURRENCY.
-DISCOVERY_CONCURRENCY = _cpu_scaled(per_core=1.5, floor=2, ceiling=8, env_var="DOPMIN_DISCOVERY_CONCURRENCY")
+DISCOVERY_CONCURRENCY = _cpu_scaled(per_core=1.0, floor=2, ceiling=4, env_var="DOPMIN_DISCOVERY_CONCURRENCY")
 
 # Retries per listing if a detail page fails to load or times out.
 MAX_DETAIL_RETRIES = 2
@@ -53,7 +57,49 @@ SLOW_NAV_THRESHOLD_MS = 12_000
 
 # How many network-level navigation failures in a row before the whole
 # search is aborted instead of grinding into a dead connection.
-MAX_CONSECUTIVE_NETWORK_FAILURES = 4
+MAX_CONSECUTIVE_NETWORK_FAILURES = 5
+
+# When the failure streak above is made of *stalls* (Google throttling),
+# NetworkHealth now spends up to this many cooldowns pausing and backing off
+# before it gives up and aborts for real — a single burst of throttling
+# shouldn't kill the whole search. Real dropped-connection ("offline")
+# failures still abort immediately; a cooldown wouldn't fix those.
+MAX_STALL_COOLDOWNS = 2
+STALL_COOLDOWN_SECONDS = 25
+
+# Realistic *desktop* user agents to rotate across Maps browser contexts.
+# Kept separate from the profiler's USER_AGENT_POOL below (which
+# intentionally mixes in mobile/Firefox UAs) because every Maps context uses
+# a fixed 1920x1080 viewport — pairing that with a mobile UA is itself a
+# mismatched-fingerprint signal. The default Playwright headless Chromium UA
+# (and its unmasked navigator.webdriver flag) is one of the easiest signals
+# for Google to key throttling off of, hence rotating this instead.
+MAPS_USER_AGENT_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
+# Injected into every Maps browser context via add_init_script(). Masks the
+# handful of properties automated Chromium exposes by default (bare
+# navigator.webdriver, empty plugins/languages) that bot-detection scripts
+# check first — without this, every context looks identical and obviously
+# scripted regardless of which user agent string it sends.
+STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+window.chrome = window.chrome || { runtime: {} };
+const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+if (originalQuery) {
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters)
+    );
+}
+"""
 
 # ---------------------------------------------------------------------------
 # Zero-Cost Audit Engine (audit.py)

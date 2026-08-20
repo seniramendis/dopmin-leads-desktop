@@ -178,11 +178,20 @@ class NetworkHealth:
         slow_threshold_ms=12_000,
         max_consecutive_failures=4,
         slow_streak_threshold=3,
+        max_stall_cooldowns=0,
+        cooldown_seconds=25,
     ):
         self.on_progress = on_progress
         self.slow_threshold_ms = slow_threshold_ms
         self.max_consecutive_failures = max_consecutive_failures
         self.slow_streak_threshold = slow_streak_threshold
+        # How many times a "stalled" (Google throttling) failure streak gets
+        # a pause-and-retry before NetworkHealth gives up and aborts for
+        # real. A "offline" (actually dropped connection) streak still
+        # aborts immediately — pausing wouldn't fix a dead connection.
+        self.max_stall_cooldowns = max_stall_cooldowns
+        self.cooldown_seconds = cooldown_seconds
+        self.cooldowns_used = 0
         self.consecutive_failures = 0
         self.consecutive_slow = 0
         self.aborted = False
@@ -218,7 +227,7 @@ class NetworkHealth:
                     }
                 )
 
-    def record_failure(self, message):
+    async def record_failure(self, message):
         offline = is_offline_error(message)
         stalled = is_stall_error(message)
         if not offline and not stalled:
@@ -227,6 +236,29 @@ class NetworkHealth:
         self.last_error_detail = str(message)
         self.consecutive_failures += 1
         if self.consecutive_failures >= self.max_consecutive_failures and not self.aborted:
+            # A stall streak (no net::ERR_ code) usually means Google is
+            # temporarily throttling the automated browser rather than the
+            # connection being dead — so back off for a bit and let the
+            # caller keep going instead of aborting the whole search on the
+            # first burst of throttling. Only offered a limited number of
+            # times per run so a genuinely persistent block still gives up
+            # instead of looping forever.
+            if stalled and self.cooldowns_used < self.max_stall_cooldowns:
+                self.cooldowns_used += 1
+                self.consecutive_failures = 0
+                if self.on_progress:
+                    self.on_progress(
+                        {
+                            "phase": "connection-slow",
+                            "message": (
+                                "Google Maps looks like it's throttling this search — "
+                                f"pausing {self.cooldown_seconds}s before continuing…"
+                            ),
+                        }
+                    )
+                await asyncio.sleep(self.cooldown_seconds)
+                return
+
             self.aborted = True
 
             if offline:

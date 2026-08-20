@@ -26,6 +26,10 @@ from constants import (
     NAV_TIMEOUT_MS,
     SLOW_NAV_THRESHOLD_MS,
     MAX_CONSECUTIVE_NETWORK_FAILURES,
+    MAX_STALL_COOLDOWNS,
+    STALL_COOLDOWN_SECONDS,
+    MAPS_USER_AGENT_POOL,
+    STEALTH_INIT_SCRIPT,
 )
 from netutil import (
     NetworkHealth,
@@ -41,6 +45,24 @@ async def block_maps_resources(route):
         await route.abort()
     else:
         await route.continue_()
+
+
+async def new_stealth_context(browser):
+    """Every Maps context goes through here instead of a bare
+    browser.new_context(). Default Playwright headless Chromium contexts all
+    share the same UA and leave navigator.webdriver set, which is one of the
+    cheapest signals Google's front-end uses to key throttling off of —
+    rotating a realistic desktop UA and masking the automation flags makes
+    each context look like an ordinary browser tab instead of a fleet of
+    identical scripted ones."""
+    context = await browser.new_context(
+        viewport={"width": 1920, "height": 1080},
+        user_agent=random.choice(MAPS_USER_AGENT_POOL),
+        locale="en-US",
+    )
+    await context.add_init_script(STEALTH_INIT_SCRIPT)
+    await context.route("**/*", block_maps_resources)
+    return context
 
 
 BLOCKED_RE = re.compile(r"unusual traffic|automated queries|our systems have detected", re.I)
@@ -132,8 +154,7 @@ async def _run_sub_query(browser, sub_query, index, total, desired, shared, on_p
         }
     )
 
-    context = await browser.new_context(viewport={"width": 1920, "height": 1080})
-    await context.route("**/*", block_maps_resources)
+    context = await new_stealth_context(browser)
     page = await context.new_page()
     
     try:
@@ -213,7 +234,7 @@ async def _run_sub_query(browser, sub_query, index, total, desired, shared, on_p
     except RateLimitedError as e:
         raise e
     except Exception as error:
-        health.record_failure(str(error))
+        await health.record_failure(str(error))
     finally:
         await context.close()
 
@@ -230,6 +251,11 @@ async def discover_listings(browser, sub_queries, desired, on_progress, health, 
     semaphore = asyncio.Semaphore(DISCOVERY_CONCURRENCY if shared["is_expanded"] else 1)
 
     async def guarded(sub_query, i):
+        # Stagger the launch of each sub-query slightly instead of letting
+        # every task race for the semaphore at t=0 — a burst of simultaneous
+        # first navigations is a stronger throttling signal to Google than
+        # the same requests spread a second or two apart.
+        await asyncio.sleep(random.uniform(0.2, 0.6) * i)
         async with semaphore:
             await _run_sub_query(browser, sub_query, i, len(sub_queries), desired, shared, on_progress, health)
 
@@ -249,8 +275,7 @@ async def extract_detail(browser, listing, health, counters):
         if health.aborted:
             return {"success": False, "href": listing["href"], "quickName": listing["quickName"], "error": "Connection lost"}
 
-        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
-        await context.route("**/*", block_maps_resources)
+        context = await new_stealth_context(browser)
         page = await context.new_page()
 
         try:
@@ -342,7 +367,7 @@ async def extract_detail(browser, listing, health, counters):
 
         except Exception as error:
             last_error = str(error)
-            health.record_failure(str(error))
+            await health.record_failure(str(error))
             attempt += 1
             counters["retries"] += 1
             if health.aborted:
@@ -422,7 +447,13 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
     if connection["quality"] == "poor":
         on_progress({"phase": "connection-slow", "message": f"Connection is slow ({connection['latency_ms']:.0f}ms)."})
 
-    health = NetworkHealth(on_progress=on_progress, slow_threshold_ms=SLOW_NAV_THRESHOLD_MS, max_consecutive_failures=MAX_CONSECUTIVE_NETWORK_FAILURES)
+    health = NetworkHealth(
+        on_progress=on_progress,
+        slow_threshold_ms=SLOW_NAV_THRESHOLD_MS,
+        max_consecutive_failures=MAX_CONSECUTIVE_NETWORK_FAILURES,
+        max_stall_cooldowns=MAX_STALL_COOLDOWNS,
+        cooldown_seconds=STALL_COOLDOWN_SECONDS,
+    )
 
     try:
         async with async_playwright() as p:
