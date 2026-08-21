@@ -64,7 +64,11 @@ MAX_CONSECUTIVE_NETWORK_FAILURES = 5
 # before it gives up and aborts for real — a single burst of throttling
 # shouldn't kill the whole search. Real dropped-connection ("offline")
 # failures still abort immediately; a cooldown wouldn't fix those.
-MAX_STALL_COOLDOWNS = 2
+# Cooldowns now scale (cooldown_seconds * attempt number, see
+# NetworkHealth.try_cooldown), so 3 attempts is 25s + 50s + 75s of total
+# backoff rather than 3 flat 25s pauses — a flat interval was retrying at
+# the same cadence that got throttled in the first place.
+MAX_STALL_COOLDOWNS = 3
 STALL_COOLDOWN_SECONDS = 25
 
 # Realistic *desktop* user agents to rotate across Maps browser contexts.
@@ -99,6 +103,56 @@ if (originalQuery) {
             : originalQuery(parameters)
     );
 }
+
+// Canvas fingerprint noise — headless Chromium renders <canvas> pixel-identically
+// across every launch on the same machine, which is a stable fingerprint bot
+// detectors hash directly. Scrapling's AsyncStealthySession applied this by
+// default; the raw-Playwright port dropped it. Nudging a handful of pixels by
+// +/-1 on each readback keeps the canvas visually identical while making the
+// hash differ per context.
+(() => {
+    const noisify = (ctx, w, h) => {
+        if (!w || !h) return;
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const data = imageData.data;
+        for (let i = 0; i < data.length; i += 97) {
+            data[i] = data[i] ^ (Math.random() < 0.5 ? 1 : 0);
+        }
+        ctx.putImageData(imageData, 0, 0);
+    };
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function (...args) {
+        try {
+            const ctx = this.getContext('2d');
+            if (ctx) noisify(ctx, this.width, this.height);
+        } catch (e) {}
+        return origToDataURL.apply(this, args);
+    };
+    const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function (...args) {
+        const result = origGetImageData.apply(this, args);
+        for (let i = 0; i < result.data.length; i += 97) {
+            result.data[i] = result.data[i] ^ (Math.random() < 0.5 ? 1 : 0);
+        }
+        return result;
+    };
+})();
+
+// WebRTC leak protection — an unpatched RTCPeerConnection exposes the
+// machine's real local/LAN IP via ICE candidates even through a proxy, which
+// is both a fingerprinting signal and a privacy leak for whoever runs this.
+// Also dropped in the Playwright port; restoring it here.
+(() => {
+    const OrigRTCPeerConnection = window.RTCPeerConnection;
+    if (!OrigRTCPeerConnection) return;
+    window.RTCPeerConnection = function (...args) {
+        const pc = new OrigRTCPeerConnection(...args);
+        const origCreateOffer = pc.createDataChannel.bind(pc);
+        pc.createDataChannel = (...cdArgs) => origCreateOffer(...cdArgs);
+        return pc;
+    };
+    window.RTCPeerConnection.prototype = OrigRTCPeerConnection.prototype;
+})();
 """
 
 # ---------------------------------------------------------------------------

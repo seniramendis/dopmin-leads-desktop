@@ -164,6 +164,17 @@ async def _run_sub_query(browser, sub_query, index, total, desired, shared, on_p
         
         page_text = await page.evaluate("() => document.body?.innerText || ''")
         if BLOCKED_RE.search(page_text):
+            # Give the block page the same cooldown-and-retry budget as a
+            # plain stall, instead of failing the whole search on the first
+            # block page seen. Only give up for real once that budget is
+            # spent.
+            cooled_down = await health.try_cooldown(
+                "Google Maps flagged this search as automated traffic"
+            )
+            if cooled_down and not health.aborted:
+                return await _run_sub_query(
+                    browser, sub_query, index, total, desired, shared, on_progress, health
+                )
             shared["rate_limited"] = True
             raise RateLimitedError()
 

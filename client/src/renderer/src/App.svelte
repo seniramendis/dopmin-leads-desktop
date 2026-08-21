@@ -39,7 +39,7 @@
   $: headerCopy = HEADER_COPY[view] || HEADER_COPY.search
 
   let query = 'hardware stores in Mount Lavinia'
-  let desiredCount = 30
+  let desiredCount = 20
   let leads = []
   let isScraping = false
   let errorMessage = ''

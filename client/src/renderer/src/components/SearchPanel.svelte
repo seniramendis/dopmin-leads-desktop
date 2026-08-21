@@ -7,7 +7,7 @@
   // onScrapeProgress — this component just collects the form inputs and
   // hands off a single search payload.
   export let query = 'hardware stores in Mount Lavinia'
-  export let desiredCount = 30
+  export let desiredCount = 20
   export let isScraping = false
   export let onSearch = () => {}
 

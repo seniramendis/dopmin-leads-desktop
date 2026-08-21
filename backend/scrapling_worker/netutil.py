@@ -205,6 +205,31 @@ class NetworkHealth:
         self.abort_message = None
         self.last_error_detail = None
 
+    async def try_cooldown(self, reason_message):
+        """Like the stall-cooldown branch of record_failure(), but callable
+        directly for a hard "unusual traffic" block page instead of only for
+        bare navigation timeouts. Returns True if a cooldown was spent (the
+        caller should pause then retry the same sub-query), False if the
+        cooldown budget is exhausted (the caller should give up for real).
+        Cooldowns get longer each time — Google's soft-blocks don't reliably
+        clear in a flat 25s, and hammering right back at the same interval
+        just re-triggers the same block."""
+        if self.cooldowns_used >= self.max_stall_cooldowns or self.aborted:
+            return False
+
+        self.cooldowns_used += 1
+        wait_s = self.cooldown_seconds * self.cooldowns_used  # 25s, 50s, 75s...
+        if self.on_progress:
+            self.on_progress(
+                {
+                    "phase": "connection-slow",
+                    "message": f"{reason_message} — pausing {wait_s}s before retrying…",
+                }
+            )
+        await asyncio.sleep(wait_s)
+        self.consecutive_failures = 0
+        return True
+
     def record_success(self, nav_ms):
         self.consecutive_failures = 0
 
@@ -243,20 +268,7 @@ class NetworkHealth:
             # first burst of throttling. Only offered a limited number of
             # times per run so a genuinely persistent block still gives up
             # instead of looping forever.
-            if stalled and self.cooldowns_used < self.max_stall_cooldowns:
-                self.cooldowns_used += 1
-                self.consecutive_failures = 0
-                if self.on_progress:
-                    self.on_progress(
-                        {
-                            "phase": "connection-slow",
-                            "message": (
-                                "Google Maps looks like it's throttling this search — "
-                                f"pausing {self.cooldown_seconds}s before continuing…"
-                            ),
-                        }
-                    )
-                await asyncio.sleep(self.cooldown_seconds)
+            if stalled and await self.try_cooldown("Google Maps looks like it's throttling this search"):
                 return
 
             self.aborted = True
