@@ -4,6 +4,11 @@ Scrapling has been completely removed to fix SPA hydration race conditions.
 
 import sys
 import io
+import os
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 # CRITICAL FIX: Force UTF-8 output for Windows console / Node IPC 
 # This prevents the 'charmap' crash when Google Maps returns \u202f spaces in prices/reviews.
@@ -164,10 +169,6 @@ async def _run_sub_query(browser, sub_query, index, total, desired, shared, on_p
         
         page_text = await page.evaluate("() => document.body?.innerText || ''")
         if BLOCKED_RE.search(page_text):
-            # Give the block page the same cooldown-and-retry budget as a
-            # plain stall, instead of failing the whole search on the first
-            # block page seen. Only give up for real once that budget is
-            # spent.
             cooled_down = await health.try_cooldown(
                 "Google Maps flagged this search as automated traffic"
             )
@@ -262,10 +263,6 @@ async def discover_listings(browser, sub_queries, desired, on_progress, health, 
     semaphore = asyncio.Semaphore(DISCOVERY_CONCURRENCY if shared["is_expanded"] else 1)
 
     async def guarded(sub_query, i):
-        # Stagger the launch of each sub-query slightly instead of letting
-        # every task race for the semaphore at t=0 — a burst of simultaneous
-        # first navigations is a stronger throttling signal to Google than
-        # the same requests spread a second or two apart.
         await asyncio.sleep(random.uniform(0.2, 0.6) * i)
         async with semaphore:
             await _run_sub_query(browser, sub_query, i, len(sub_queries), desired, shared, on_progress, health)
@@ -433,12 +430,6 @@ def to_lead(raw, index):
 
 
 def _abort_result(health):
-    """Builds the error result from whatever NetworkHealth actually recorded,
-    instead of a single hardcoded "Connection dropped mid-search" string
-    that used to fire for plain navigation timeouts (Google throttling an
-    automated browser, local CPU contention) exactly the same as a real
-    dropped connection. errorType now reflects which one actually
-    happened."""
     return {
         "success": False,
         "error": health.abort_message or "The search stopped unexpectedly. Please try again.",
@@ -450,6 +441,17 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
     options = options or {}
     desired = max(1, min(500, int(max_results or 20)))
     sub_queries = expand_query(query, options.get("mode", ""))
+    
+    # ---------------------------------------------------------
+    # SECURITY: Grab Bright Data URL from .env
+    # ---------------------------------------------------------
+    sbr_ws_endpoint = os.getenv("BRIGHT_DATA_WS_ENDPOINT")
+    if not sbr_ws_endpoint:
+        return {
+            "success": False, 
+            "error": "Bright Data endpoint is missing. Please add BRIGHT_DATA_WS_ENDPOINT to your .env file.", 
+            "errorType": "config"
+        }
 
     on_progress({"phase": "searching", "message": "Checking your internet connection…"})
     connection = await measure_connection_quality()
@@ -468,15 +470,8 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
 
     try:
         async with async_playwright() as p:
-            # SHUTTING THE VISUAL TABS DOWN - HEADLESS IS TRUE AGAIN
-            browser = await p.chromium.launch(
-                headless=True, 
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-infobars',
-                    '--no-sandbox',
-                ]
-            )
+            # Injecting the secure URL here
+            browser = await p.chromium.connect_over_cdp(sbr_ws_endpoint)
 
             shared = await discover_listings(browser, sub_queries, desired, on_progress, health)
             listings = list(shared["listings"].values())

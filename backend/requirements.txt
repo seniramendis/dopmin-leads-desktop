@@ -6,3 +6,4 @@ curl_cffi
 slowapi
 libsql-client
 playwright
+python-dotenv
