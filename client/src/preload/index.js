@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 // Custom APIs for renderer
 const api = {
+  /** Reads the current scraping mode: { useBrightData, brightDataEndpoint }. */
+  getScrapeSettings: () => ipcRenderer.invoke('get-scrape-settings'),
+
+  /** Updates the scraping mode. Partial updates are fine — omitted fields
+   * are left as-is.
+   * @param {{ useBrightData?: boolean, brightDataEndpoint?: string }} payload */
+  setScrapeSettings: (payload) => ipcRenderer.invoke('set-scrape-settings', payload),
+
   /** Runs a search (Google Maps local leads, or IT Projects/RFPs when
    * payload.mode === 'it_projects') and returns the final result.
    * @param {{ query: string, maxResults?: number, category?: string, region?: string, mode?: string, industry?: string, source?: string }} payload */

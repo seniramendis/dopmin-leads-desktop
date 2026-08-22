@@ -7,8 +7,15 @@
   let saved = false
   let loading = true
 
+  let enableBrightDataFallback = false
+  let brightDataEndpoint = ''
+  let scrapeSaved = false
+
   onMount(async () => {
-    apiKey = (await window.api.getApiKey()) || ''
+    apiKey = (await window.api.getApiKey?.()) || ''
+    const scrapeSettings = await window.api.getScrapeSettings()
+    enableBrightDataFallback = scrapeSettings.enableBrightDataFallback
+    brightDataEndpoint = scrapeSettings.brightDataEndpoint
     loading = false
   })
 
@@ -16,6 +23,14 @@
     await window.api.setApiKey(apiKey.trim())
     saved = true
     setTimeout(() => (saved = false), 1500)
+  }
+
+  async function saveScrapeSettings() {
+    const result = await window.api.setScrapeSettings({ enableBrightDataFallback, brightDataEndpoint })
+    enableBrightDataFallback = result.enableBrightDataFallback
+    brightDataEndpoint = result.brightDataEndpoint
+    scrapeSaved = true
+    setTimeout(() => (scrapeSaved = false), 1500)
   }
 </script>
 
@@ -25,6 +40,47 @@
       <h2>Settings</h2>
       <button class="close-btn" on:click={onClose} aria-label="Close">✕</button>
     </div>
+
+    <label class="field-label" for="scrape-mode">Search reliability</label>
+    <p class="hint">
+      Every search always runs on a local browser first — fastest, no account needed. If Google
+      rate-limits or stalls a search, Dopmin can automatically switch the rest of that same
+      search over to Bright Data's remote proxy browser instead of just failing. Off by default;
+      turn it on and paste your Bright Data connection string once you have one.
+    </p>
+
+    {#if !loading}
+      <label class="toggle-row">
+        <input type="checkbox" bind:checked={enableBrightDataFallback} />
+        <span>Automatically fall back to Bright Data if a search stalls</span>
+      </label>
+
+      {#if enableBrightDataFallback}
+        <label class="field-label" for="bright-data-endpoint">Bright Data WS endpoint</label>
+        <input
+          id="bright-data-endpoint"
+          type="password"
+          bind:value={brightDataEndpoint}
+          placeholder="wss://brd-customer-...-zone-...:PASSWORD@brd.superproxy.io:9222"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        {#if !brightDataEndpoint}
+          <p class="hint warn">
+            No endpoint entered — the fallback won't actually trigger until you paste your
+            Bright Data Scraping Browser connection string here.
+          </p>
+        {/if}
+      {/if}
+
+      <div class="modal-actions" style="margin-bottom: 20px;">
+        <button class="primary-btn" on:click={saveScrapeSettings}
+          >{scrapeSaved ? 'Saved ✓' : 'Save'}</button
+        >
+      </div>
+    {/if}
+
+    <hr class="divider" />
 
     <label class="field-label" for="gemini-key">Gemini API key (free tier)</label>
     <p class="hint">
@@ -74,6 +130,8 @@
     padding: 22px 24px;
     width: 420px;
     max-width: 92vw;
+    max-height: 88vh;
+    overflow-y: auto;
   }
 
   .modal-header {
@@ -112,6 +170,10 @@
     margin: 0 0 10px;
   }
 
+  .hint.warn {
+    color: #b5462f;
+  }
+
   .link-btn {
     border: none;
     background: none;
@@ -120,6 +182,27 @@
     font-size: inherit;
     cursor: pointer;
     text-decoration: underline;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+    font-size: 0.84rem;
+    color: var(--text-1);
+    cursor: pointer;
+  }
+
+  .toggle-row input {
+    width: auto;
+    margin: 0;
+  }
+
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 18px 0;
   }
 
   input {
@@ -159,3 +242,4 @@
     color: #fff;
   }
 </style>
+

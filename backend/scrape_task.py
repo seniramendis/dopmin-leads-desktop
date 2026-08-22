@@ -389,7 +389,10 @@ async def extract_detail(browser, listing, health, counters):
 
 
 async def run_detail_pool(browser, listings, on_progress, health):
-    semaphore = asyncio.Semaphore(3) 
+    # See matching note in scrapling_worker/maps_pipeline.py: this must use
+    # DETAIL_CONCURRENCY (which respects Bright Data's remote session limit
+    # via DOPMIN_DETAIL_CONCURRENCY) rather than a hardcoded local number.
+    semaphore = asyncio.Semaphore(DETAIL_CONCURRENCY)
     counters = {"retries": 0, "completed": 0}
     total = len(listings)
 

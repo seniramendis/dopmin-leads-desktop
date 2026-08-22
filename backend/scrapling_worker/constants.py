@@ -31,19 +31,21 @@ def _cpu_scaled(per_core, floor, ceiling, env_var):
     return max(floor, min(ceiling, round(cores * per_core)))
 
 
-# How many place detail pages we read at once. Scrapling's AsyncStealthySession
-# page pool is created with this size; disable_resources=True keeps each tab's
-# CPU/RAM footprint low enough to support several in parallel, but it's still
-# a real Chromium process per tab — scaled to cores, not a flat number, so it
-# doesn't overrun weaker machines. Override with DOPMIN_DETAIL_CONCURRENCY.
-# NOTE: lowered from the old 2.5/14 ceiling — that many simultaneous Maps
-# navigations from a single IP with no proxy is what was tripping Google's
-# soft-block ("stopped responding to repeated page loads") in the first
-# place. Gentler concurrency is slower but far less likely to get throttled.
+# How many place detail pages we read at once.
+#
+# This governs a local Chromium instance's tab count when BRIGHT_DATA_WS_ENDPOINT
+# is unset (the default, and dramatically faster — see maps_pipeline.py's
+# scrape_leads()), so it's fine to scale it to CPU cores again. It's ALSO
+# used as the concurrency cap when Bright Data IS configured, where the real
+# ceiling is your Bright Data plan's concurrent-session limit rather than
+# local CPU — if you're using Bright Data and see the "stopped responding to
+# repeated page loads" stall error, set DOPMIN_DETAIL_CONCURRENCY (and
+# DOPMIN_DISCOVERY_CONCURRENCY) to 1 or 2 in your .env to match your plan.
 DETAIL_CONCURRENCY = _cpu_scaled(per_core=1.5, floor=3, ceiling=8, env_var="DOPMIN_DETAIL_CONCURRENCY")
 
 # How many category sub-queries run at once during discovery. Kept at or
-# below DETAIL_CONCURRENCY since both draw from the same browser page pool.
+# below DETAIL_CONCURRENCY since both draw from the same browser page pool
+# (or the same Bright Data zone, if configured).
 # Override with DOPMIN_DISCOVERY_CONCURRENCY.
 DISCOVERY_CONCURRENCY = _cpu_scaled(per_core=1.0, floor=2, ceiling=4, env_var="DOPMIN_DISCOVERY_CONCURRENCY")
 
@@ -70,6 +72,16 @@ MAX_CONSECUTIVE_NETWORK_FAILURES = 5
 # the same cadence that got throttled in the first place.
 MAX_STALL_COOLDOWNS = 3
 STALL_COOLDOWN_SECONDS = 25
+
+# Hard ceiling on a single browser attempt (local OR Bright Data) within one
+# search. Without this, a persistent stall/rate-limit combined with the
+# cooldown backoff above (25s+50s+75s=150s) plus per-listing retries could
+# run for many minutes with nothing visibly happening — which reads as an
+# infinite loop even though it does eventually stop. Wrapping each attempt
+# in asyncio.wait_for(..., timeout=MAX_SEARCH_SECONDS) guarantees a result
+# (or a clean fallback/failure) within a bounded, predictable time instead.
+# Override with DOPMIN_MAX_SEARCH_SECONDS.
+MAX_SEARCH_SECONDS = int(os.environ.get("DOPMIN_MAX_SEARCH_SECONDS", "150"))
 
 # Realistic *desktop* user agents to rotate across Maps browser contexts.
 # Kept separate from the profiler's USER_AGENT_POOL below (which

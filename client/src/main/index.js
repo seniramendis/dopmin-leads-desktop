@@ -42,6 +42,7 @@ import { runZeroCostAudit } from './auditEngine'
 import { analyzeBusinessProfile } from './analystEngine'
 import { analyzeDomainWithProxy } from './network'
 import { getApiKey } from './secureStore'
+import { getScrapeSettings, setScrapeSettings } from './scrapeSettings'
 import { triggerCloudScrape, pollCloudJob } from './cloudBridge'
 import {
   upsertLeads,
@@ -85,6 +86,12 @@ function createWindow() {
 }
 
 function registerIpcHandlers() {
+  // Settings > Scraping mode — local browser (default, fast, no account
+  // needed) vs Bright Data's remote Scraping Browser (opt-in, useful once
+  // your own IP starts getting rate-limited from heavy search volume).
+  ipcMain.handle('get-scrape-settings', () => getScrapeSettings())
+  ipcMain.handle('set-scrape-settings', (_event, payload = {}) => setScrapeSettings(payload))
+
   ipcMain.handle('start-scraping', async (event, searchData = {}) => {
     const query = typeof searchData === 'string' ? searchData : searchData.query || ''
     const rawMaxResults = typeof searchData === 'string' ? 20 : (searchData.maxResults ?? 20)

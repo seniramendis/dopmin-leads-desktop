@@ -33,6 +33,7 @@ from constants import (
     MAX_CONSECUTIVE_NETWORK_FAILURES,
     MAX_STALL_COOLDOWNS,
     STALL_COOLDOWN_SECONDS,
+    MAX_SEARCH_SECONDS,
     MAPS_USER_AGENT_POOL,
     STEALTH_INIT_SCRIPT,
 )
@@ -389,7 +390,16 @@ async def extract_detail(browser, listing, health, counters):
 
 
 async def run_detail_pool(browser, listings, on_progress, health):
-    semaphore = asyncio.Semaphore(3) 
+    # NOTE: was hardcoded to Semaphore(3), which silently ignored the
+    # DOPMIN_DETAIL_CONCURRENCY override below. That matters a lot more now
+    # that the browser lives on Bright Data's remote Scraping Browser
+    # (connect_over_cdp) rather than locally — DETAIL_CONCURRENCY is CPU-
+    # scaled, but the real ceiling here is Bright Data's *concurrent
+    # session* limit for your plan/zone, not your machine's core count.
+    # Opening more contexts at once than Bright Data allows makes the extra
+    # ones hang until they time out, which surfaces as the "Google Maps
+    # stopped responding" stall error even though Google was never hit.
+    semaphore = asyncio.Semaphore(DETAIL_CONCURRENCY)
     counters = {"retries": 0, "completed": 0}
     total = len(listings)
 
@@ -437,21 +447,85 @@ def _abort_result(health):
     }
 
 
+async def _attempt_scrape(browser, sub_queries, desired, on_progress, health, shared):
+    """Runs one full discovery + detail-extraction pass against `browser`,
+    resuming from whatever `shared` already holds (listings already found,
+    detail pages already succeeded) so a fallback to a different browser
+    doesn't throw away work already done. Never raises — every failure
+    mode is folded into the returned status so the caller can decide
+    whether to retry with a different browser.
+
+    Returns {"status": "ok"} or {"status": "needs_fallback"} (stall/rate
+    limit — worth retrying through Bright Data if configured) or
+    {"status": "aborted"} (e.g. offline — retrying won't help).
+    """
+    try:
+        shared = await discover_listings(browser, sub_queries, desired, on_progress, health, shared=shared)
+    except RateLimitedError:
+        shared["rate_limited"] = True
+
+    listings = list(shared["listings"].values())
+
+    if (
+        not shared["is_expanded"]
+        and len(listings) < desired
+        and not shared["rate_limited"]
+        and not health.aborted
+    ):
+        broader_queries = broaden_query(sub_queries[0], sub_queries)
+        if broader_queries:
+            on_progress({"phase": "searching", "message": f"Only found {len(listings)} — broadening search…"})
+            shared["is_expanded"] = True
+            shared["queries_used"] = sub_queries + broader_queries
+            try:
+                shared = await discover_listings(browser, broader_queries, desired, on_progress, health, shared=shared)
+            except RateLimitedError:
+                shared["rate_limited"] = True
+            listings = list(shared["listings"].values())
+
+    if health.aborted:
+        return {"status": "needs_fallback" if health.abort_reason == "stalled" else "aborted"}
+    if shared["rate_limited"]:
+        return {"status": "needs_fallback"}
+
+    if not listings:
+        return {"status": "ok"}
+
+    target_listings = listings[:desired]
+    already = shared["detail_by_href"]
+    remaining = [listing for listing in target_listings if listing["href"] not in already]
+
+    if remaining:
+        on_progress({"phase": "extracting", "done": len(already), "total": len(target_listings), "retries": 0})
+        detail_results = await run_detail_pool(browser, remaining, on_progress, health)
+        for result in detail_results:
+            if result and result.get("success"):
+                already[result["href"]] = result
+
+    if health.aborted:
+        return {"status": "needs_fallback" if health.abort_reason == "stalled" else "aborted"}
+
+    return {"status": "ok"}
+
+
 async def scrape_leads(query, max_results=20, options=None, on_progress=lambda payload: None):
     options = options or {}
     desired = max(1, min(500, int(max_results or 20)))
     sub_queries = expand_query(query, options.get("mode", ""))
-    
+
     # ---------------------------------------------------------
-    # SECURITY: Grab Bright Data URL from .env
+    # Always try a local browser first — fastest, no third-party account
+    # needed, and works for the overwhelming majority of searches. If a
+    # search hits a real stall/rate-limit (not just a slow-but-working
+    # connection) AND a Bright Data endpoint is configured, we
+    # automatically retry the *rest* of that same search through Bright
+    # Data's remote Scraping Browser instead of failing outright. Nothing
+    # already found (listings, successfully-scraped detail pages) is
+    # thrown away when this happens — see _attempt_scrape's `shared` reuse.
+    # If no Bright Data endpoint is set, a stall just fails normally, same
+    # as before.
     # ---------------------------------------------------------
-    sbr_ws_endpoint = os.getenv("BRIGHT_DATA_WS_ENDPOINT")
-    if not sbr_ws_endpoint:
-        return {
-            "success": False, 
-            "error": "Bright Data endpoint is missing. Please add BRIGHT_DATA_WS_ENDPOINT to your .env file.", 
-            "errorType": "config"
-        }
+    fallback_endpoint = os.getenv("BRIGHT_DATA_WS_ENDPOINT") or None
 
     on_progress({"phase": "searching", "message": "Checking your internet connection…"})
     connection = await measure_connection_quality()
@@ -460,53 +534,89 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
     if connection["quality"] == "poor":
         on_progress({"phase": "connection-slow", "message": f"Connection is slow ({connection['latency_ms']:.0f}ms)."})
 
-    health = NetworkHealth(
-        on_progress=on_progress,
-        slow_threshold_ms=SLOW_NAV_THRESHOLD_MS,
-        max_consecutive_failures=MAX_CONSECUTIVE_NETWORK_FAILURES,
-        max_stall_cooldowns=MAX_STALL_COOLDOWNS,
-        cooldown_seconds=STALL_COOLDOWN_SECONDS,
-    )
+    shared = {
+        "listings": {},
+        "rate_limited": False,
+        "launched": 0,
+        "is_expanded": len(sub_queries) > 1,
+        "detail_by_href": {},
+        "queries_used": list(sub_queries),
+    }
+
+    final_status = "ok"
+    final_health = None
 
     try:
         async with async_playwright() as p:
-            # Injecting the secure URL here
-            browser = await p.chromium.connect_over_cdp(sbr_ws_endpoint)
+            # Local attempt first, then one Bright Data attempt if that
+            # stalls/rate-limits and an endpoint is configured. Local uses
+            # a shorter cooldown budget than before (1 backoff instead of
+            # 3) so a real block gets detected and handed off to the
+            # fallback in well under a minute, instead of grinding through
+            # ~150s of escalating cooldowns before anyone finds out.
+            attempts = [{"remote": False}]
+            if fallback_endpoint:
+                attempts.append({"remote": True})
 
-            shared = await discover_listings(browser, sub_queries, desired, on_progress, health)
+            for attempt in attempts:
+                health = NetworkHealth(
+                    on_progress=on_progress,
+                    slow_threshold_ms=SLOW_NAV_THRESHOLD_MS,
+                    max_consecutive_failures=MAX_CONSECUTIVE_NETWORK_FAILURES,
+                    max_stall_cooldowns=1 if not attempt["remote"] else MAX_STALL_COOLDOWNS,
+                    cooldown_seconds=STALL_COOLDOWN_SECONDS,
+                )
+                final_health = health
+
+                if attempt["remote"]:
+                    on_progress({
+                        "phase": "connection-slow",
+                        "message": "Local browser hit a rate limit — switching to Bright Data for the rest of this search…",
+                    })
+                    browser = await p.chromium.connect_over_cdp(fallback_endpoint)
+                else:
+                    browser = await p.chromium.launch(headless=True)
+
+                try:
+                    outcome = await asyncio.wait_for(
+                        _attempt_scrape(browser, sub_queries, desired, on_progress, health, shared),
+                        timeout=MAX_SEARCH_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    # Hard ceiling hit — stop for good instead of grinding
+                    # on. We still return whatever was already found below,
+                    # rather than nothing, since a several-minute run that
+                    # ends in a blank result is the single worst outcome
+                    # here (looks exactly like an infinite loop to the user).
+                    outcome = {"status": "timeout"}
+                finally:
+                    await browser.close()
+
+                if outcome["status"] == "ok":
+                    final_status = "ok"
+                    break
+
+                if outcome["status"] == "needs_fallback" and not attempt["remote"] and fallback_endpoint:
+                    # Loop continues into the Bright Data attempt above.
+                    continue
+
+                final_status = outcome["status"]
+                break
+
             listings = list(shared["listings"].values())
             is_expanded = shared["is_expanded"]
-            rate_limited = shared["rate_limited"]
-
-            queries_used = list(sub_queries)
-            if not is_expanded and len(listings) < desired and not rate_limited and not health.aborted:
-                broader_queries = broaden_query(sub_queries[0], sub_queries)
-                if broader_queries:
-                    on_progress({"phase": "searching", "message": f"Only found {len(listings)} — broadening search…"})
-                    shared["is_expanded"] = True
-                    shared = await discover_listings(browser, broader_queries, desired, on_progress, health, shared=shared)
-                    listings = list(shared["listings"].values())
-                    is_expanded = True
-                    queries_used = sub_queries + broader_queries
-
-            if health.aborted: return _abort_result(health)
-            if not listings: return {"success": True, "leads": [], "requested": desired, "totalFound": 0, "truncated": False, "failedCount": 0, "expanded": is_expanded, "queriesUsed": queries_used}
-
+            queries_used = shared["queries_used"]
             target_listings = listings[:desired]
-            on_progress({"phase": "extracting", "done": 0, "total": len(target_listings), "retries": 0})
+            leads = [to_lead(raw, i) for i, raw in enumerate(shared["detail_by_href"].values())]
+            failed_count = max(0, len(target_listings) - len(leads))
 
-            detail_results = await run_detail_pool(browser, target_listings, on_progress, health)
-
-            if health.aborted: return _abort_result(health)
-
-            attempted = [r for r in detail_results if r]
-            succeeded = [r for r in attempted if r.get("success")]
-            failed_count = len(attempted) - len(succeeded)
-            leads = [to_lead(raw, i) for i, raw in enumerate(succeeded)]
+            if final_status == "aborted" and not leads:
+                # A real (non-stall) abort with literally nothing collected
+                # yet — surface the specific reason rather than an empty
+                # success, same as before this change.
+                return _abort_result(final_health)
 
             on_progress({"phase": "done", "total": len(leads)})
-
-            await browser.close()
 
             return {
                 "success": True,
@@ -517,6 +627,8 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
                 "failedCount": failed_count,
                 "expanded": is_expanded,
                 "queriesUsed": queries_used,
+                "timedOut": final_status == "timeout",
+                "usedFallback": bool(fallback_endpoint) and final_status != "aborted" and len(attempts if fallback_endpoint else []) > 1,
             }
     except RateLimitedError as error:
         return {"success": False, "error": str(error)}

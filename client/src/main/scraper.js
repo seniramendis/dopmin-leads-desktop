@@ -20,6 +20,7 @@ import { spawn } from 'child_process'
 import path from 'path'
 import { runPythonWorker } from './pythonBridge'
 import { getApiKey } from './secureStore'
+import { scrapeEnvOverrides } from './scrapeSettings'
 
 /**
  * Google Maps lead search. Same signature and result shape as before the
@@ -32,7 +33,12 @@ export async function scrapeLeads(query, maxResults = 20, onProgress, options = 
   return runPythonWorker(
     'maps_cli.py',
     [String(query || ''), String(maxResults ?? 20), options.mode || ''],
-    onProgress
+    onProgress,
+    // Passes the user's Settings > Scraping mode choice through as an env
+    // override, same pattern as the Gemini key below — this is what lets
+    // toggling "Local browser" vs "Bright Data" in the UI actually change
+    // which one maps_cli.py uses, without editing backend/.env by hand.
+    scrapeEnvOverrides()
   )
 }
 
