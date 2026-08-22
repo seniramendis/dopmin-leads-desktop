@@ -37,14 +37,27 @@ export function setScrapeSettings({ enableBrightDataFallback, brightDataEndpoint
   return getScrapeSettings()
 }
 
-/** Env override for the maps_cli.py child process: only set
- * BRIGHT_DATA_WS_ENDPOINT when the user has actually enabled the fallback
- * AND entered an endpoint — otherwise pass an empty string so it can't
- * accidentally pick up a stray value from backend/.env or the system
- * environment while the user thinks fallback is off. */
+/** Env override for the maps_cli.py child process.
+ *
+ * Priority:
+ *   1. In-app Settings toggle + endpoint (enableBrightDataFallback +
+ *      brightDataEndpoint) — if the user has explicitly turned this on and
+ *      entered a value, that always wins.
+ *   2. Otherwise, fall back to whatever BRIGHT_DATA_WS_ENDPOINT is already
+ *      sitting in backend/.env / the system environment, so setting it
+ *      there is enough on its own without also touching the Settings UI.
+ *   3. Empty string if neither is set.
+ *
+ * Previously this unconditionally returned '' whenever the in-app toggle
+ * was off, which silently discarded a value the user had put in .env —
+ * that's fixed by the process.env fallback in step 2. */
 export function scrapeEnvOverrides() {
   const { enableBrightDataFallback, brightDataEndpoint } = getScrapeSettings()
+  const endpoint =
+    enableBrightDataFallback && brightDataEndpoint
+      ? brightDataEndpoint
+      : process.env.BRIGHT_DATA_WS_ENDPOINT || ''
   return {
-    BRIGHT_DATA_WS_ENDPOINT: enableBrightDataFallback && brightDataEndpoint ? brightDataEndpoint : ''
+    BRIGHT_DATA_WS_ENDPOINT: endpoint
   }
 }

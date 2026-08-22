@@ -47,7 +47,13 @@ from query_expansion import expand_query, broaden_query
 
 async def block_maps_resources(route):
     """Blocks heavy media but allows Maps SPA to hydrate (keeps stylesheets/scripts)."""
-    if route.request.resource_type() in ("image", "media", "font"):
+    # NOTE: Playwright's *Python* API exposes resource_type as a plain str
+    # property, not a callable — unlike the Node/JS API's resourceType()
+    # method this was ported from. Calling it as a function raised
+    # "TypeError: 'str' object is not callable" inside every route handler,
+    # which silently killed navigation on every single request (looked
+    # exactly like Google stalling/rate-limiting from the outside).
+    if route.request.resource_type in ("image", "media", "font"):
         await route.abort()
     else:
         await route.continue_()
@@ -610,10 +616,43 @@ async def scrape_leads(query, max_results=20, options=None, on_progress=lambda p
             leads = [to_lead(raw, i) for i, raw in enumerate(shared["detail_by_href"].values())]
             failed_count = max(0, len(target_listings) - len(leads))
 
-            if final_status == "aborted" and not leads:
-                # A real (non-stall) abort with literally nothing collected
-                # yet — surface the specific reason rather than an empty
-                # success, same as before this change.
+            if not leads and final_status != "ok":
+                # BUGFIX: previously only "aborted" was checked here, so a
+                # rate-limited/blocked run (final_status == "needs_fallback")
+                # or a hard timeout with zero leads fell through to the
+                # "success" return below with an empty leads array — the UI
+                # then shows a misleading "No results found for this search"
+                # instead of telling the user Google actually blocked the
+                # scrape. Surface the real reason for every non-"ok" status
+                # that collected nothing, not just "aborted".
+                if final_status == "needs_fallback":
+                    if fallback_endpoint:
+                        return {
+                            "success": False,
+                            "error": (
+                                "Google rate-limited both the local browser and the Bright Data "
+                                "fallback for this search. Wait a few minutes and try again, or "
+                                "double-check your Bright Data zone/session limits (see "
+                                "DOPMIN_DETAIL_CONCURRENCY in your .env)."
+                            ),
+                            "errorType": "rate_limited",
+                        }
+                    return {
+                        "success": False,
+                        "error": (
+                            "Google temporarily rate-limited this search and no Bright Data "
+                            "fallback is configured. Wait a bit and try again, or add "
+                            "BRIGHT_DATA_WS_ENDPOINT to your backend/.env for automatic fallback."
+                        ),
+                        "errorType": "rate_limited",
+                    }
+                if final_status == "timeout":
+                    return {
+                        "success": False,
+                        "error": "The search timed out before finding any results. Try a smaller result count, or try again.",
+                        "errorType": "timeout",
+                    }
+                # "aborted" (offline / hard stall with cooldowns exhausted)
                 return _abort_result(final_health)
 
             on_progress({"phase": "done", "total": len(leads)})
