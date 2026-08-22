@@ -21,7 +21,7 @@
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^3.0.0",
     "@libsql/client": "^0.17.4",
-    "electron-store": "^10.0.0",
+    "electron-store": "^8.1.0",
     "playwright": "^1.62.0",
     "sql.js": "^1.13.0"
   },
